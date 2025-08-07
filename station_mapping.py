@@ -26,6 +26,24 @@ stations = [
     ("Yellowknife", 62.4540, -114.3718),
     ("Prince George", 53.9171, -122.7497),
     ("Victoria", 48.4284, -123.3656),
+    ("Smithers", 54.7800, -127.1743),
+    ("Dease Lake", 58.4356, -130.0089),
+    ("Fort St. John", 56.2524, -120.8466),
+    ("High Level", 58.5169, -117.1360),
+    ("Peace River", 56.2333, -117.2833),
+    ("La Ronge", 55.1000, -105.3000),
+    ("Flin Flon", 54.7682, -101.8779),
+    ("Churchill", 58.7684, -94.1650),
+    ("Moosonee", 51.2794, -80.6463),
+    ("Timmins", 48.4758, -81.3305),
+    ("Val-d'Or", 48.1086, -77.7972),
+    ("Chibougamau", 49.9167, -74.3667),
+    ("Schefferville", 54.8000, -66.8167),
+    ("Goose Bay", 53.3019, -60.3267),
+    ("St. John's", 47.5615, -52.7126),
+    ("Iqaluit", 63.7467, -68.5170),
+    ("Rankin Inlet", 62.8090, -92.0853),
+    ("Cambridge Bay", 69.1167, -105.0667)
 ]
 
 #Convert stations to GeoDataFrame for spatial operations
@@ -51,11 +69,11 @@ grid_gdf = grid_gdf.to_crs(epsg=3347)
 nearest_station_index = []
 for point in grid_gdf.geometry:
   distances = stations_gdf.geometry.distance(point)
-  nearest_station_index.append(distances.idxmin)
+  nearest_station_index.append(stations_gdf.loc[distances.idxmin(), "name"])
 
 #Save mapping
-grid_gdf["nearest_station"] = nearest_station_index
+grid_gdf["nearest_station_name"] = nearest_station_index
 
-grid_gdf[["lat", "lon", "nearest_station"]].to_csv("grid_to_station_map.csv", index=False)
+grid_gdf[["lat", "lon", "nearest_station_name"]].to_csv("stations.csv", index=False)
 
 print("Nearest station mapping saved")
