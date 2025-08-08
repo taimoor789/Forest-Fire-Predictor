@@ -79,5 +79,5 @@ with open(output_file, mode="a", newline="") as f:
     #Write multiple rows of weather data to the CSV file
     writer.writerows(weather_data)
 
-print(f"✅ Saved weather data for {len(weather_data)} cities at  {calgary_time} (Calgary Time)")
+print(f" Saved weather data for {len(weather_data)} cities at  {calgary_time} (Calgary Time)")
 
