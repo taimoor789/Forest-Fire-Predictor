@@ -119,6 +119,15 @@ if not os.path.exists(output_file):
     pd.DataFrame(columns=["lat", "lon", "date", "temperature", "humidity", "wind_speed"]).to_csv(output_file, index=False)
 
 #Append today's data
-pd.DataFrame(grid_weather).to_csv(output_file, mode="a", header=False, index=False)
+#pd.DataFrame(grid_weather).to_csv(output_file, mode="a", header=False, index=False)
+
+#Make sure the folder exists
+os.makedirs("weather_data", exist_ok=True)
+
+#Save today's data as a separate CSV file
+today_str = datetime.now().strftime("%Y-%m-%d")
+output_path = f"weather_data/{today_str}.csv"
+
+pd.DataFrame(grid_weather).to_csv(output_path, index=False)
 
 print(f"Saved weather for {len(grid_weather)} grid cells at {calgary_time}")
