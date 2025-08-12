@@ -3,5 +3,3 @@ cron_logs.txt
 config.json
 
 fire_risk_model.pkl
-
-run_weather.sh

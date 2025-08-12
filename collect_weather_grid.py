@@ -7,20 +7,19 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
 
-#load api key
+#load api key 
 with open("config.json") as f:
     config = json.load(f)
 
 API_KEY = config["openweather_api_key"]
 
- #Read nearest station mapping
-mapping_df = pd.read_csv("stations.csv") 
+#Read nearest station mapping 
+mapping_df = pd.read_csv("stations.csv")
 
-#List of unique station names
+#List of unique station names 
 unique_stations = mapping_df["nearest_station_name"].unique()
 
-
-# Keep this in sync with the one in station_mapping.py
+#Keep this in sync with the one in station_mapping.py 
 station_coords = {
     "Vancouver": (49.2827, -123.1207),
     "Kelowna": (49.8880, -119.4960),
@@ -64,15 +63,47 @@ station_coords = {
 
 #function to get weather for a station
 def get_weather(lat, lon):
+    #Returns a dict of values 
     url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={API_KEY}&units=metric"
     try:
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=6)
         if response.status_code == 200:
             data = response.json()
+
+            # main: temp, feels_like, pressure, humidity, temp_min/max
+            main = data.get("main", {})
+            # wind: speed, deg, gust 
+            wind = data.get("wind", {}) or {}
+            # clouds: percentage
+            clouds = data.get("clouds", {}) or {}
+            # precipitation: "rain" and "snow" fields may or may not exist
+            rain = data.get("rain", {}) or {}
+            snow = data.get("snow", {}) or {}
+            # "weather" is a list of condition objects; take first for main/description
+            weather_list = data.get("weather", [])
+            weather_main = weather_list[0].get("main") if weather_list else None
+            weather_desc = weather_list[0].get("description") if weather_list else None
+
+            # Build the returned dictionary
             return {
-                "temperature": data["main"]["temp"],
-                "humidity": data["main"]["humidity"],
-                "wind_speed": data["wind"]["speed"]
+                "temperature": main.get("temp"),                    # °C
+                "feels_like": main.get("feels_like"),               # °C
+                "temp_min": main.get("temp_min"),                   # °C
+                "temp_max": main.get("temp_max"),                   # °C
+                "pressure": main.get("pressure"),                   # hPa
+                "humidity": main.get("humidity"),                   # %
+                "wind_speed": wind.get("speed"),                    # m/s
+                "wind_deg": wind.get("deg"),                        # degrees
+                "wind_gust": wind.get("gust"),                      # m/s 
+                "clouds_pct": clouds.get("all"),                    # %
+                "visibility": data.get("visibility"),               # meters 
+                "rain_1h": rain.get("1h", 0.0),                     # mm in last 1h (0 if missing)
+                "rain_3h": rain.get("3h", 0.0),                     # mm in last 3h (0 if missing)
+                "snow_1h": snow.get("1h", 0.0),                     # mm in last 1h (0 if missing)
+                "snow_3h": snow.get("3h", 0.0),                     # mm in last 3h (0 if missing)
+                "weather_main": weather_main,                       
+                "weather_description": weather_desc,              
+                "timestamp_utc": data.get("dt")                     
             }
         else:
             print(f"Failed for {lat},{lon} — Status code {response.status_code}")
@@ -81,53 +112,87 @@ def get_weather(lat, lon):
         print(f" Error for {lat},{lon}: {e}")
         return None
 
-#fetch weather for each station
+# fetch weather for each station (once per unique station)
 station_weather = {}
-for station in unique_stations: #for every station
-    if station in station_coords: #if the station is in the station coords dict above
-        lat, lon = station_coords[station] #use the dict's key to get the lat/lon from the tuple
-        weather = get_weather(lat, lon) #use that lat/lon in the get_weather function
-        if weather: #if there's weather data
-            station_weather[station] = weather #store it in station_weather using dict key
+for station in unique_stations:  # for every station referenced by mapping.csv
+    if station in station_coords:  # if the station is in the station_coords dict above
+        lat, lon = station_coords[station]  # get lat/lon from the dict
+        weather = get_weather(lat, lon)    
+        if weather:                        
+            station_weather[station] = weather
     else:
-        print(f" No coordinates found for {station}")
+        print(f"No coordinates found for station: {station}")
 
-#Assign weather to all grid cells
 calgary_tz = ZoneInfo("America/Edmonton")
 calgary_time = datetime.now(calgary_tz).strftime("%Y-%m-%d %H:%M:%S")
 
-#creating dict using all cells with all weather 
-#info required
+#Create output rows
 grid_weather = []
 for _, row in mapping_df.iterrows():
     station = row["nearest_station_name"]
     if station in station_weather:
+        w = station_weather[station]  #the dict returned by get_weather
+
+        # Append a row with the expanded set of fields
+        grid_weather.append({
+            "lat": row["lat"],
+            "lon": row["lon"],
+            "date": calgary_time,                      
+            "nearest_station": station,                 
+            "temperature": w.get("temperature"),
+            "humidity": w.get("humidity"),
+            "wind_speed": w.get("wind_speed"),
+            "feels_like": w.get("feels_like"),
+            "temp_min": w.get("temp_min"),
+            "temp_max": w.get("temp_max"),
+            "pressure": w.get("pressure"),
+            "wind_deg": w.get("wind_deg"),
+            "wind_gust": w.get("wind_gust"),
+            "clouds_pct": w.get("clouds_pct"),
+            "visibility_m": w.get("visibility"),
+            "rain_1h_mm": w.get("rain_1h"),
+            "rain_3h_mm": w.get("rain_3h"),
+            "snow_1h_mm": w.get("snow_1h"),
+            "snow_3h_mm": w.get("snow_3h"),
+            "weather_main": w.get("weather_main"),
+            "weather_description": w.get("weather_description"),
+            "timestamp_utc": w.get("timestamp_utc")
+        })
+    else:
+        # If there's no station weather (API failed), append row with None values
         grid_weather.append({
             "lat": row["lat"],
             "lon": row["lon"],
             "date": calgary_time,
-            "temperature": station_weather[station]["temperature"],
-            "humidity": station_weather[station]["humidity"],
-            "wind_speed": station_weather[station]["wind_speed"]
+            "nearest_station": station,
+            "temperature": None,
+            "humidity": None,
+            "wind_speed": None,
+            "feels_like": None,
+            "temp_min": None,
+            "temp_max": None,
+            "pressure": None,
+            "wind_deg": None,
+            "wind_gust": None,
+            "clouds_pct": None,
+            "visibility_m": None,
+            "rain_1h_mm": None,
+            "rain_3h_mm": None,
+            "snow_1h_mm": None,
+            "snow_3h_mm": None,
+            "weather_main": None,
+            "weather_description": None,
+            "timestamp_utc": None
         })
 
-#save to csv
-output_file = "grid_weather_history.csv"
-
-# If file doesn't exist, create it with header
-if not os.path.exists(output_file):
-    pd.DataFrame(columns=["lat", "lon", "date", "temperature", "humidity", "wind_speed"]).to_csv(output_file, index=False)
-
-#Append today's data
-#pd.DataFrame(grid_weather).to_csv(output_file, mode="a", header=False, index=False)
-
-#Make sure the folder exists
+#Make sure the folder exists 
 os.makedirs("weather_data", exist_ok=True)
 
-#Save today's data as a separate CSV file
+#Save today's data as a separate CSV file 
 today_str = datetime.now().strftime("%Y-%m-%d")
 output_path = f"weather_data/{today_str}.csv"
 
+#Convert to DataFrame and write CSV
 pd.DataFrame(grid_weather).to_csv(output_path, index=False)
 
 print(f"Saved weather for {len(grid_weather)} grid cells at {calgary_time}")
