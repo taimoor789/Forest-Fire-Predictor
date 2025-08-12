@@ -3,3 +3,7 @@ cron_logs.txt
 config.json
 
 fire_risk_model.pkl
+weather_data/2025-08-07.csv
+weather_history.csv
+grid_weather_history.csv
+collect_weather.py
