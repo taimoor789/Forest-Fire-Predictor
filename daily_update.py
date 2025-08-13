@@ -10,16 +10,20 @@ os.chdir(script_dir)
 def run_script(script_name):
     """Run a Python script and return True if successful, False if failed"""
     try:
-        # Run the script and capture any errors
-        result = subprocess.run([sys.executable, script_name], capture_output=True, text=True, check=True)
+        #Runs another Python script (script_name) as a subprocess
+        result = subprocess.run(
+            [sys.executable, script_name],  #Command: run script_name using the same Python interpreter
+            capture_output=True,  # Captures stdout/stderr (instead of printing to terminal)
+            text=True,  #Returns output as strings (not bytes)
+            check=True  #Raises CalledProcessError if the subprocess fails
+        )
         return True
     except:
         # If anything goes wrong, return False
         return False
 
 def main():
-    """Run all 3 scripts and report results"""
-    
+    #Run all 3 scripts and report results
     # List of scripts to run in order
     scripts = [
         "collect_weather_grid.py",      #Get today's weather data
@@ -46,5 +50,6 @@ def main():
         for script in failed_scripts:
             print(f"  - {script}")
 
+#Checks if the script is being run directly (not imported as a module)
 if __name__ == "__main__":
-    main()
+    main()  #Calls the main() function only when the script is executed directly
