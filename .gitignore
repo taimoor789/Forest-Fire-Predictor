@@ -2,8 +2,6 @@ cron_logs.txt
 
 config.json
 
-fire_risk_model.pkl
-
 daily_update.log
 
 model_component/
