@@ -10,9 +10,6 @@ import joblib
 #Load the labeled data
 df = pd.read_csv("labeled_weather_data.csv")
 
-print(f"Dataset shape: {df.shape}")
-print(f"Fire occurrence distribution:\n{df['historical_fire'].value_counts()}")
-
 #Feature engineering - create more meaningful features for fire prediction
 def adjust_features(df):
    #Create additional features that are relevant for fire risk prediction
@@ -74,13 +71,11 @@ features = [
     'weather_main_encoded' #Encoded categorical features
 ]
 
-
-
 #Features (X) vs Label (y)
 #Features (independent variables): Inputs the model uses to predict.
 #Label (dependent variable): The target we want to predict.
 X = df[features]
-y = df["historical_fire"].astype(float)
+y = df['historical_fire'].astype(int)
 
 # Split to evaluate model performance on unseen data (avoid overfitting).
 # X_train: Features for training (80% of data).
@@ -88,24 +83,40 @@ y = df["historical_fire"].astype(float)
 # y_train: Labels for training.
 # y_test: Labels for testing (ground truth for evaluation).
 # random_state=42 ensures reproducibility (same split every time).
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+#stratify=y maintains class balance in split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size =0.2, random_state=42, stratify=y)
 
-#RandomForestRegressor: Ensemble model for regression (predicts continuous fire risk probability).
-#n_estimators=100: Number of decision trees in the forest.
-model = RandomForestRegressor(n_estimators=100, random_state=42)
-model.fit(X_train, y_train)  # Train on training data (features + labels)
+#Scale features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.fit_transform(X_test)
 
-#Predict fire risk probabilities for test set features (X_test).
+#Tune hyperparameters for better performance
+model = RandomForestClassifier(
+   n_estimators=200, #More trees for better performance
+   max_depth=15,  #Control overfitting
+   min_samples_split=10, #Control overfitting
+   min_samples_leaf=5, #Control overfitting
+   class_weight='balanced', #Handle imbalanced dataset
+   random_state=42,
+   n_jobs=-1  #Use all CPU cores
+)
+
+model.fit(X_train, y_train) #Train the model
+
+#Predict fire risk probabilities for test set features (X_test)
 y_pred = model.predict(X_test)
+y_pred_proba = model.predict_proba(X_test)[:, 1] #Prob fire happens
 
-#Mean Squared Error (MSE): Average squared difference between predicted/actual values (lower = better).
-# R² Score: Proportion of variance explained by the model (1.0 = perfect fit).
-mse = mean_squared_error(y_test, y_pred)
-r2 = r2_score(y_test, y_pred)
+#Evaluate the model
+accuracy = accuracy_score(y_test, y_pred)
+roc_auc = roc_auc_score(y_test, y_pred_proba)
 
-print(f"Mean Squared Error: {mse:.4f}")
-print(f"R² Score: {r2:.4f}")
+print(f"Model trained successfully!")
+print(f"Accuracy: {accuracy:.3f} | ROC AUC: {roc_auc:.3f}")
 
-#joblib.dump(): Saves the trained model to a file for later use (e.g., deployment).
-joblib.dump(model, "fire_risk_model.pkl")
-print("\nModel saved as fire_risk_model.pkl")
+# Save model components
+joblib.dump(model, "model_components/fire_risk_model.pkl")
+joblib.dump(scaler, "model_components/fire_risk_scaler.pkl")
+joblib.dump(label_encoder, "model_components/weather_encoder.pkl")
+joblib.dump(features, "model_components/model_features.pkl")

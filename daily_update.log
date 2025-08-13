@@ -1,2 +1,4 @@
 Pipeline completed successfully!
-
+Pipeline failed!
+Failed scripts:
+  - fire_risk.py
