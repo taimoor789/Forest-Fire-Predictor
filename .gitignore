@@ -2,8 +2,8 @@ cron_logs.txt
 
 config.json
 
-daily_update.log
-
 model_component/
 
 weather_data/
+
+daily_update.log
