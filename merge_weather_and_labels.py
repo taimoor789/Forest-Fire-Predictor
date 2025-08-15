@@ -15,10 +15,6 @@ for file_name in os.listdir(weather_folder):
     file_path = os.path.join(weather_folder, file_name)
     weather_df = pd.read_csv(file_path)
 
-     #If no 'date' column, extract date from filename
-    if "date" not in weather_df.columns:
-      weather_df["date"] = file_name.replace(".csv", "")
-
     all_weather.append(weather_df)
 
 #Combine all weather DataFrames into one
