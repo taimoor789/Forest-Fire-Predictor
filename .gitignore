@@ -7,3 +7,5 @@ model_component/
 weather_data/
 
 daily_update.log
+
+venv/
