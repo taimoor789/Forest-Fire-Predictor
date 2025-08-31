@@ -5,9 +5,73 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, roc_auc_score
 import joblib
+import glob 
+import os
+from datetime import datetime, timedelta
 
-#Load the labeled data
-df = pd.read_csv("labeled_weather_data.csv")
+def get_recent_weather_files(days_back=30):
+   #Get weather files from the last 30 days
+   weather_files = glob.glob("weather_data/*.csv")
+
+   if not weather_files: 
+      raise FileNotFoundError("No weather data files found")
+   
+   #Get files from last N days
+   recent_files = []
+   cuttoff_date = datetime.now() - timedelta(days=days_back)
+
+   for file in weather_files:
+      filename = os.path.basename(file)
+      try: 
+         file_date = datetime.strptime(filename.replace('.csv', ''), '%Y-%m-%d')
+         if file_date >= cuttoff_date:
+            recent_files.append(file)
+      except ValueError:
+          #If filename doesn't match date format, include it anyway
+          recent_files.append(file)
+
+    #If no recent files, use the most recent available
+   if not recent_files:
+      recent_files = [max(weather_files, key=os.path.getctime)]
+   
+   return recent_files
+
+def load_and_combine_weather_data(files):
+   #Load multiple weather CSV files and combine them
+   all_data = []
+
+   for file in files:
+      try: 
+         df = pd.read_csv(file)
+         all_data.append(df)
+      except Exception as e:
+         print(f"Error loading {file}: {e}")
+   
+   if not all_data:
+      raise ValueError("No weather data could be loaded")
+   
+   combined_df = pd.concat(all_data, ignore_index=True)
+
+   return combined_df
+
+def add_fire_labels(weather_df):
+   try:
+      fire_df = pd.read_csv("canada_fire_grid.csv")
+        
+      result_df = weather_df.merge(
+         fire_df[['lat', 'lon', 'historical_fire']], 
+         on=['lat', 'lon'], 
+         how='left'
+      )
+        
+      #Fill any unmatched locations with 0 and ensure integer 
+      result_df['historical_fire'] = result_df['historical_fire'].fillna(0).astype(int)
+        
+      return result_df
+        
+   except FileNotFoundError:
+      print("ERROR: canada_fire_grid.csv not found!")
+      raise
 
 def adjust_features(df):
    #Create additional features that are relevant for fire risk prediction
@@ -42,11 +106,6 @@ def adjust_features(df):
         (1 - df['has_recent_precip']) * 0.1)
    
    return df
-
-df = adjust_features(df)
-
-#Create location groups to prevent leakage
-df['location_group'] = df['lat'].astype(str) + '_' + df['lon'].astype(str)
 
 #Split preprocessing: only use training data statistics
 def safe_preprocessing(df_train, df_test):
@@ -84,76 +143,110 @@ def safe_preprocessing(df_train, df_test):
    df_test['weather_main_encoded'] = test_encoded
    return df_train, df_test, label_encoder
 
-features = [
-    'temperature', 'humidity', 'wind_speed', 'pressure',
-    'temp_min', 'temp_max', 'feels_like',
-    'wind_gust_filled', 'clouds_pct', 'visibility_m',
-    'rain_1h_mm', 'rain_3h_mm', 'snow_1h_mm', 'snow_3h_mm',
-    
-    #Engineered weather features
-    'temp_range', 'is_hot', 'is_dry', 'humidity_temp_ratio',
-    'is_windy', 'total_precip', 'has_recent_precip',
-    'is_high_pressure', 'fire_danger_index',
-    
-    #Encoded categorical features
-    'weather_main_encoded'
-]
+def main():
 
-#Ensures same locations don't appear in both train and test
-#test_size=0.2: 20% of locations will be allocated to test set
-#n_splits=1: Only perform one split (train/test)
-#random_state=42: Ensures reproducible splits across runs
-splitter = GroupShuffleSplit(test_size=0.2, n_splits=1, random_state=42)
+   #Get recent weather files (last 30 days)
+   weather_files = get_recent_weather_files(days_back=30)
 
-#The split() method returns indices for train/test sets 
-#First(df): The full dataset (not actually used, just for dimensions)
-#y=df['historical_fire']: The target variable (used for stratified splitting if needed)
-# groups=df['location_group']: Defines the grouping structure
-# next() extracts the first (and only) split from the generator
-train_idx, test_idx = next(splitter.split(df, df['historical_fire'], groups=df['location_group']))
+   #Load and combine weather data
+   df = load_and_combine_weather_data(weather_files)
 
-#Create the actual train/test DataFrames, using .iloc to select rows by position index
-#.copy() ensures we get new DataFrames rather than views
-df_train = df.iloc[train_idx].copy()#Contains 80% of unique locations
-df_test = df.iloc[test_idx].copy()  #Contains 20% of unique locations
+   #Add fire labels
+   df = add_fire_labels(df)
 
-#Call function which handles missing values using only training set statistics, encodes categorical variables using only training set categories, returns the DataFrames along with the fitted encoder
-df_train, df_test, label_encoder = safe_preprocessing(df_train, df_test)
+   #Apply feature engineering
+   df = adjust_features(df)
 
-#Only includes the columns specified in the 'features' list
-#This creates the input variables the model will learn from
-X_train = df_train[features]  #Training features (80% of locations)
-X_test = df_test[features]    #Test features (20% of NEW locations)
+   #Create location groups to prevent leakage
+   df['location_group'] = df['lat'].astype(str) + '_' + df['lon'].astype(str)
 
-#These are what the model will try to predict
-y_train = df_train['historical_fire'] 
-y_test = df_test['historical_fire']    #ground truth for evaluation
+   #Define features for the model
+   features = [
+      'temperature', 'humidity', 'wind_speed', 'pressure',
+      'temp_min', 'temp_max', 'feels_like',
+      'wind_gust_filled', 'clouds_pct', 'visibility_m',
+      'rain_1h_mm', 'rain_3h_mm', 'snow_1h_mm', 'snow_3h_mm',
+      
+      #Engineered weather features
+      'temp_range', 'is_hot', 'is_dry', 'humidity_temp_ratio',
+      'is_windy', 'total_precip', 'has_recent_precip',
+      'is_high_pressure', 'fire_danger_index',
+      
+      #Encoded categorical features
+      'weather_main_encoded'
+   ]
 
-#Data Flow:
-#Raw Data → Train/Test Split → Safe Preprocessing → Feature/Target Separation → Model
-model = RandomForestClassifier(
-   n_estimators=200, #More trees for better performance
-   max_depth=15,  #Control overfitting
-   min_samples_split=10, #Control overfitting
-   min_samples_leaf=5, #Control overfitting
-   class_weight='balanced', #Handle imbalanced dataset
-   random_state=42,
-   n_jobs=-1  #Use all CPU cores
-)
-model.fit(X_train, y_train) #Train the model
+   #Ensures same locations don't appear in both train and test
+   #test_size=0.2: 20% of locations will be allocated to test set
+   #n_splits=1: Only perform one split (train/test)
+   #random_state=42: Ensures reproducible splits across runs
+   splitter = GroupShuffleSplit(test_size=0.2, n_splits=1, random_state=42)
 
-#Predict fire risk probabilities for test set features (X_test)
-y_pred = model.predict(X_test)
-y_pred_proba = model.predict_proba(X_test)[:, 1] #Prob fire happens
+   #The split() method returns indices for train/test sets 
+   #First(df): The full dataset (not actually used, just for dimensions)
+   #y=df['historical_fire']: The target variable (used for stratified splitting if needed)
+   # groups=df['location_group']: Defines the grouping structure
+   # next() extracts the first (and only) split from the generator
+   train_idx, test_idx = next(splitter.split(df, df['historical_fire'], groups=df['location_group']))
 
-#Evaluate the model
-accuracy = accuracy_score(y_test, y_pred)
-roc_auc = roc_auc_score(y_test, y_pred_proba)
+   #Create the actual train/test DataFrames, using .iloc to select rows by position index
+   #.copy() ensures we get new DataFrames rather than views
+   df_train = df.iloc[train_idx].copy()#Contains 80% of unique locations
+   df_test = df.iloc[test_idx].copy()  #Contains 20% of unique locations
 
-print(f"Model trained successfully!")
-print(f"Accuracy: {accuracy:.3f} | ROC AUC: {roc_auc:.3f}")
+   #Call function which handles missing values using only training set statistics, encodes categorical variables using only training set categories, returns the DataFrames along with the fitted encoder
+   df_train, df_test, label_encoder = safe_preprocessing(df_train, df_test)
 
-#Save model components
-joblib.dump(model, "model_components/fire_risk_model.pkl")
-joblib.dump(label_encoder, "model_components/weather_encoder.pkl")
-joblib.dump(features, "model_components/model_features.pkl")
+   #Only includes the columns specified in the 'features' list
+   #This creates the input variables the model will learn from
+   X_train = df_train[features]  #Training features (80% of locations)
+   X_test = df_test[features]    #Test features (20% of NEW locations)
+
+   #These are what the model will try to predict
+   y_train = df_train['historical_fire'] 
+   y_test = df_test['historical_fire']    #ground truth for evaluation
+
+   #Data Flow:
+   #Raw Data → Train/Test Split → Safe Preprocessing → Feature/Target Separation → Model
+   model = RandomForestClassifier(
+      n_estimators=200, #More trees for better performance
+      max_depth=15,  #Control overfitting
+      min_samples_split=10, #Control overfitting
+      min_samples_leaf=5, #Control overfitting
+      class_weight='balanced', #Handle imbalanced dataset
+      random_state=42,
+      n_jobs=-1  #Use all CPU cores
+   )
+   model.fit(X_train, y_train) #Train the model
+
+   #Predict fire risk probabilities for test set features (X_test)
+   y_pred = model.predict(X_test)
+   y_pred_proba = model.predict_proba(X_test)[:, 1] #Prob fire happens
+
+   #Evaluate the model
+   accuracy = accuracy_score(y_test, y_pred)
+   roc_auc = roc_auc_score(y_test, y_pred_proba)
+
+   print(f"Model trained successfully!")
+   print(f"Accuracy: {accuracy:.3f} | ROC AUC: {roc_auc:.3f}")
+
+   #Save model components
+   joblib.dump(model, "model_components/fire_risk_model.pkl")
+   joblib.dump(label_encoder, "model_components/weather_encoder.pkl")
+   joblib.dump(features, "model_components/model_features.pkl")
+
+   #Save model info for API
+   model_info = {
+      "accuracy": float(accuracy),
+      "roc_auc": float(roc_auc),
+      "training_records": len(df_train),
+      "features_count": len(features),
+      "last_trained": datetime.now().isoformat()
+   }
+
+   import json
+   with open("model_info.json", "w") as f:
+      json.dump(model_info, f, indent=2)
+
+if __name__ == "__main__":
+    main()

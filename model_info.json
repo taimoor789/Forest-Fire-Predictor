@@ -1,0 +1,7 @@
+{
+  "accuracy": 0.803155498240754,
+  "roc_auc": 0.9320967583151374,
+  "training_records": 251181,
+  "features_count": 24,
+  "last_trained": "2025-08-31T02:57:19.984241"
+}

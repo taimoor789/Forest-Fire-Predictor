@@ -1,15 +1,18 @@
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
+from datetime import datetime
 
-# Change to script directory so file paths work correctly
+#Change to script directory so file paths work correctly
 script_dir = Path(__file__).parent.absolute()
 os.chdir(script_dir)
 
 def run_script(script_name):
     """Run a Python script and return True if successful, False if failed"""
     try:
+        print(f"Running {script_name}...")
         #Runs another Python script (script_name) as a subprocess
         result = subprocess.run(
             [sys.executable, script_name],  #Command: run script_name using the same Python interpreter
@@ -17,39 +20,126 @@ def run_script(script_name):
             text=True,  #Returns output as strings (not bytes)
             check=True  #Raises CalledProcessError if the subprocess fails
         )
+        print(f" {script_name} completed successfully")
+        if result.stdout:
+            print(f"Output: {result.stdout}")
         return True
     except:
+        print(f"{script_name} failed")
         # If anything goes wrong, return False
         return False
 
-def main():
-    #Run all 3 scripts and report results
-    # List of scripts to run in order
+def start_api_server():
+  #Start the FastAPI server in the background
+  try:
+     process = subprocess.Popen(
+         [sys.executable, "main.py"],
+         stdout=subprocess.PIPE,
+         stderr=subprocess.PIPE,
+         text=True
+        )
+
+     #Give the server time to start
+     time.sleep(3)
+
+      #Check if process is still running
+     if process.poll() is None:
+        print(" FastAPI server started successfully on http://localhost:8000")
+        return process
+     else:
+        stdout, stderr = process.communicate()
+        print(f" FastAPI server failed to start")
+        if stderr:
+            print(f"Error: {stderr}")
+        return None
+  except Exception as e:
+       print(f" Failed to start API server: {str(e)}")
+       return None
+
+def run_data_pipeline():
+    #List of scripts to run in order
     scripts = [
-        "collect_weather_grid.py",      #Get today's weather data
-        "merge_weather_and_labels.py",  #Combine weather with fire history
-        "fire_risk.py"                  #Train model and make predictions
+        "collect_weather_grid.py",  #Get today's weather data
+        "fire_risk.py"              #Train model and make predictions
     ]
-    
-    failed_scripts = []  # Keep track of which scripts failed
+
+    failed_scripts = []
     
     # Run each script
     for script in scripts:
-        if os.path.exists(script):  # Make sure file exists
-            if not run_script(script):  # Try to run it
-                failed_scripts.append(script)  # Add to failed list if it didn't work
+        if os.path.exists(script):
+            if not run_script(script):
+                failed_scripts.append(script)
         else:
-            failed_scripts.append(f"{script} (file not found)")  # File missing
+            failed_scripts.append(f"{script} (file not found)")
     
-    # Display final results
     if len(failed_scripts) == 0:
-        print("Pipeline completed successfully!")
+        print(" Data pipeline completed successfully!")
+        return True
     else:
-        print("Pipeline failed!")
         print("Failed scripts:")
         for script in failed_scripts:
             print(f"  - {script}")
+        return False
+  
+def main():
+    #Main function to run the complete system
+    try: 
+        print(f"Starting Forest Fire Predictor system at {datetime.now()}")
+       #Step 1: Run the data pipeline (weather + model training)
+        pipeline_success = run_data_pipeline() 
+
+        if not pipeline_success:
+            print("\n Pipeline failed, but continuing with API server...")
+        
+        #Step 2: Start the API server
+        server_process = start_api_server()
+
+        if server_process:
+            print("- Backend API: http://localhost:8000")
+            print("- Health Check: http://localhost:8000/health")
+
+             #Keep the server running
+            try:
+                server_process.wait()
+            except KeyboardInterrupt:
+                print("\n\nShutting down server...")
+                server_process.terminate()
+                server_process.wait()
+                print(" Server stopped")
+        else:
+            print("\n Failed to start API server")
+            return 1
+        
+    except KeyboardInterrupt:
+        print("\n\nOperation cancelled")
+        return 1
+    except Exception as e:
+        print(f"\n Unexpected error: {str(e)}")
+        return 1
+    
+    return 0
+
+def pipeline_only():
+
+    print(f"Running pipeline-only mode at {datetime.now()}")
+    #Run only the data pipeline without starting the server
+    success = run_data_pipeline()
+    
+    if success:
+        print(" Pipeline completed successfully")
+        return 0
+    else:
+        print(" Pipeline failed")
+        return 1
 
 #Checks if the script is being run directly (not imported as a module)
 if __name__ == "__main__":
-    main()  #Calls the main() function only when the script is executed directly
+    #Check command line arguments
+    if len(sys.argv) > 1 and sys.argv[1] == "--pipeline-only":
+        #Just run the pipeline for cron jobs
+        sys.exit(pipeline_only())
+    else:
+        #Run full system
+        sys.exit(main())
+    
