@@ -126,6 +126,14 @@ def pipeline_only():
     #Run only the data pipeline without starting the server
     success = run_data_pipeline()
     
+    if success: 
+        try:
+           import requests
+           response = requests.post('http://localhost:8000/api/model/reload', timeout=10)
+           print(f"Model reload triggered: {response.status_code}")
+        except Exception as e:
+            print(f" Could not trigger model reload: {e}")
+           
     if success:
         print(" Pipeline completed successfully")
         return 0

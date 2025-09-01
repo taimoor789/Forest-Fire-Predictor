@@ -11,13 +11,59 @@ import subprocess
 import sys
 from pathlib import Path
 import logging
+from contextlib import asynccontextmanager
 
 #Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-#Initialize FastAPI app
-app = FastAPI(title="Forest Fire Predictor API", version="1.0.0")
+#Global variables for model components
+model = None
+label_encoder = None
+features = None
+model_info_data = None
+
+#Load model on startup
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    #Startup
+    global model, label_encoder, features, model_info_data
+    logger.info("Loading model components...")
+    
+    try: 
+        model = joblib.load("model_components/fire_risk_model.pkl")
+        label_encoder = joblib.load("model_components/weather_encoder.pkl")
+        features = joblib.load("model_components/model_features.pkl")
+
+        #Load model info from JSON file
+        try: 
+            with open("model_info.json", "r") as f:
+                model_info_data = json.load(f)
+                logger.info(f"Model info loaded: accuracy={model_info_data.get('accuracy', 'N/A')}")
+        except FileNotFoundError:
+            logger.warning("model_info.json not found, using defaults")
+            model_info_data = {
+                "accuracy": 0.804, 
+                "roc_auc": 0.933,
+                "last_trained": datetime.now().isoformat()
+            }
+    except Exception as e:
+        print(f"Model loading error: {e}")
+        model_info_data = {
+            "accuracy": 0.0,
+            "roc_auc": 0.0,
+            "last_trained": "never"
+        }
+    
+    yield  # This separates startup from shutdown
+    # Shutdown code would go here (if needed)
+
+#Initialize FastAPI app with lifespan
+app = FastAPI(
+    title="Forest Fire Predictor API", 
+    version="1.0.0",
+    lifespan=lifespan
+)
 
 #Enable Cross-Origin Resource Sharing so Next.js frontend can call backend
 app.add_middleware(
@@ -28,45 +74,6 @@ app.add_middleware(
   allow_methods=["*"],  #Allow all HTTP methods (GET, POST, etc.)
   allow_headers=["*"] #Allow all headers
 )
-
-#Global variables for model components
-model = None
-label_encoder = None
-features = None
-model_info_data = None
-
-#Load model on startup
-@app.on_event("startup")
-async def load_model():
-  global model, label_encoder, features, model_info_data
-
-  logger.info("Loading model components...")
-
-  try: 
-    model = joblib.load("model_components/fire_risk_model.pkl")
-    label_encoder = joblib.load("model_components/weather_encoder.pkl")
-    features = joblib.load("model_components/model_features.pkl")
-
-    #Load model info from JSON file
-    try: 
-       with open("model_info.json", "r") as f:
-          model_info_data = json.load(f)
-          logger.info(f"Model info loaded: accuracy={model_info_data.get('accuracy', 'N/A')}")
-    except FileNotFoundError:
-      logger.warning("model_info.json not found, using defaults")
-      #Fallback if model_info.json doesn't exist
-      model_info_data = {
-            "accuracy": 0.804, 
-            "roc_auc": 0.933,
-            "last_trained": datetime.now().isoformat()
-         }
-  except Exception as e:
-    print(f"Model loading error: {e}")
-    model_info_data = {
-         "accuracy": 0.0,
-         "roc_auc": 0.0,
-         "last_trained": "never"
-      }
 
 def get_latest_weather():
   weather_files = glob.glob("weather_data/*.csv")   
@@ -134,6 +141,10 @@ def get_province_from_station(station_name):
         "Moosonee": "ON", "Timmins": "ON", "Montreal": "QC", "Quebec City": "QC", "Val-d'Or": "QC",  "Chibougamau": "QC", "Schefferville": "QC", "Halifax": "NS", "Goose Bay": "NL", "St. John's": "NL", "Whitehorse": "YT", "Yellowknife": "NT", "Iqaluit": "NU", "Rankin Inlet": "NU", "Cambridge Bay": "NU"
     }
     return province_mapping.get(station_name, "Unknown")
+
+@app.get("/")
+async def root():
+    return {"message": "Forest Fire Predictor API", "version": "1.0.0", "status": "running"}
 
 @app.get("/health")
 async def health_check():
@@ -237,12 +248,22 @@ async def retrain_model():
       )
 
       #Reload model after retraining
-      await load_model()
+      await lifespan()
 
       return {"success": True, "message": "Model retrained successfully"}
    except Exception as e:
       logger.error(f"Retraining failed: {str(e)}")
       raise HTTPException(status_code=500, detail=f"Retraining failed: {str(e)}")
+
+@app.post("/api/model/reload")
+async def reload_model():
+   #Reload the model components without retraining
+   try: 
+      await lifespan()
+      return {"success": True, "message": "Model reloaded successfully"}
+   except Exception as e:
+       logger.error(f"Model reload failed: {e}")
+       raise HTTPException(status_code=500, detail=f"Model reload failed: {str(e)}")
 
 if __name__ == "__main__":
    import uvicorn 
