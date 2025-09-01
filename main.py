@@ -195,7 +195,7 @@ async def get_fire_risk_predictions():
 
           predictions.append({
              "lat": float(row['lat']),
-             "lng": float(row['lon']),
+             "lon": float(row['lon']),
              "location_name": station_name,
              "province": province,
              "fire_risk_probability": float(probabilities[i]),
@@ -247,6 +247,14 @@ async def retrain_model():
          timeout=300
       )
 
+      global model, label_encoder, features,model_info_data
+      model = joblib.load("model_components/fire_risk_model.pkl")
+      label_encoder = joblib.load("model_components/weather_encoder.pkl")
+      features = joblib.load("model_components/model_features.pkl")
+      
+      with open("model_info.json", "r") as f:
+          model_info_data = json.load(f)
+
       #Reload model after retraining
       await lifespan()
 
@@ -259,7 +267,14 @@ async def retrain_model():
 async def reload_model():
    #Reload the model components without retraining
    try: 
-      await lifespan()
+      global model, label_encoder, features,model_info_data
+      model = joblib.load("model_components/fire_risk_model.pkl")
+      label_encoder = joblib.load("model_components/weather_encoder.pkl")
+      features = joblib.load("model_components/model_features.pkl")
+      
+      with open("model_info.json", "r") as f:
+          model_info_data = json.load(f)
+          
       return {"success": True, "message": "Model reloaded successfully"}
    except Exception as e:
        logger.error(f"Model reload failed: {e}")
