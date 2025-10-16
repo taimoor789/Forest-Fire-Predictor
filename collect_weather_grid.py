@@ -6,6 +6,14 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
+import time 
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
+RETRY_DELAY = 5
 
 #load api key 
 with open("config.json") as f:
@@ -62,7 +70,7 @@ station_coords = {
 }
 
 #function to get weather for a station
-def get_weather(lat, lon):
+def get_weather(lat, lon, retry=0):
     #Returns a dict of values 
     url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={API_KEY}&units=metric"
     try:
@@ -105,11 +113,25 @@ def get_weather(lat, lon):
                 "weather_description": weather_desc,              
                 "timestamp_utc": data.get("dt")                     
             }
+        elif response.status_code == 429:  # Rate limited
+            if retry < MAX_RETRIES:
+                logger.warning(f"Rate limited, retrying in {RETRY_DELAY}s...")
+                time.sleep(RETRY_DELAY)
+                return get_weather(lat, lon, retry + 1)
+            else:
+                logger.error(f"Rate limit exceeded after {MAX_RETRIES} retries")
+                return None
         else:
-            print(f"Failed for {lat},{lon} — Status code {response.status_code}")
+            logger.error(f"Status code {response.status_code}")
             return None
+    except requests.Timeout:
+        if retry < MAX_RETRIES:
+            logger.warning(f"Timeout, retrying...")
+            time.sleep(RETRY_DELAY)
+            return get_weather(lat, lon, retry + 1)
+        return None
     except Exception as e:
-        print(f" Error for {lat},{lon}: {e}")
+        logger.error(f"Error: {e}")
         return None
 
 # fetch weather for each station (once per unique station)
