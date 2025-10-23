@@ -11,3 +11,16 @@ daily_update.log
 venv/
 
 logs/
+# Elastic Beanstalk Files
+.elasticbeanstalk/*
+!.elasticbeanstalk/*.cfg.yml
+!.elasticbeanstalk/*.global.yml
+
+/.elasticbeanstalk
+/.ebextensions
+/.ebignore
+/fwi_predictions.json
+/Procfile
+/requirements.txt
+/model_info.json
+/forest-fire-api.zip

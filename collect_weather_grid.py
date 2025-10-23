@@ -16,10 +16,9 @@ MAX_RETRIES = 3
 RETRY_DELAY = 5
 
 #load api key 
-with open("config.json") as f:
-    config = json.load(f)
-
-API_KEY = config["openweather_api_key"]
+API_KEY = os.environ.get("OPENWEATHER_API_KEY")
+if not API_KEY:
+    raise ValueError("OPENWEATHER_API_KEY environment variable not set")
 
 #Read nearest station mapping 
 mapping_df = pd.read_csv("stations.csv")
