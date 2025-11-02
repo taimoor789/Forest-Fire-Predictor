@@ -1,5 +1,3 @@
-#Need to assign station weather to all grid cells mapped to it and fetch weather for each station.
-
 import pandas as pd
 import requests
 import json
@@ -7,26 +5,32 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
 import time 
-import logging
+from logging_config import setup_logging, get_logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+setup_logging()
+logger = get_logger(__name__)
 
 MAX_RETRIES = 3
 RETRY_DELAY = 5
+REQUEST_TIMEOUT = 10
 
-#load api key 
+# Load API key with validation
 API_KEY = os.environ.get("OPENWEATHER_API_KEY")
 if not API_KEY:
     raise ValueError("OPENWEATHER_API_KEY environment variable not set")
 
-#Read nearest station mapping 
-mapping_df = pd.read_csv("stations.csv")
+# Read nearest station mapping
+try:
+    mapping_df = pd.read_csv("stations.csv")
+    logger.info(f"Loaded {len(mapping_df)} grid cells from stations.csv")
+except FileNotFoundError:
+    logger.error("stations.csv not found!")
+    raise
+except Exception as e:
+    logger.error(f"Error reading stations.csv: {e}")
+    raise
 
-#List of unique station names 
-unique_stations = mapping_df["nearest_station_name"].unique()
-
-#Keep this in sync with the one in station_mapping.py 
+# Station coordinates
 station_coords = {
     "Vancouver": (49.2827, -123.1207),
     "Kelowna": (49.8880, -119.4960),
@@ -68,98 +72,147 @@ station_coords = {
     "Cambridge Bay": (69.1167, -105.0667)
 }
 
-#function to get weather for a station
 def get_weather(lat, lon, retry=0):
-    #Returns a dict of values 
+    """
+    Fetch weather data with proper error handling and retries.
+    Returns dict of weather values or None on failure.
+    """
     url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={API_KEY}&units=metric"
+    
     try:
-        response = requests.get(url, timeout=6)
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        
         if response.status_code == 200:
             data = response.json()
-
-            # main: temp, feels_like, pressure, humidity, temp_min/max
-            main = data.get("main", {})
-            # wind: speed, deg, gust 
+            
+            # Extract data with safe defaults
+            main = data.get("main", {}) or {}
             wind = data.get("wind", {}) or {}
-            # clouds: percentage
             clouds = data.get("clouds", {}) or {}
-            # precipitation: "rain" and "snow" fields may or may not exist
             rain = data.get("rain", {}) or {}
             snow = data.get("snow", {}) or {}
-            # "weather" is a list of condition objects; take first for main/description
             weather_list = data.get("weather", [])
-            weather_main = weather_list[0].get("main") if weather_list else None
-            weather_desc = weather_list[0].get("description") if weather_list else None
+            weather_main = weather_list[0].get("main") if weather_list else "Unknown"
+            weather_desc = weather_list[0].get("description") if weather_list else "No description"
 
-            # Build the returned dictionary
             return {
-                "temperature": main.get("temp"),                    # °C
-                "feels_like": main.get("feels_like"),               # °C
-                "temp_min": main.get("temp_min"),                   # °C
-                "temp_max": main.get("temp_max"),                   # °C
-                "pressure": main.get("pressure"),                   # hPa
-                "humidity": main.get("humidity"),                   # %
-                "wind_speed": wind.get("speed"),                    # m/s
-                "wind_deg": wind.get("deg"),                        # degrees
-                "wind_gust": wind.get("gust"),                      # m/s 
-                "clouds_pct": clouds.get("all"),                    # %
-                "visibility": data.get("visibility"),               # meters 
-                "rain_1h": rain.get("1h", 0.0),                     # mm in last 1h (0 if missing)
-                "rain_3h": rain.get("3h", 0.0),                     # mm in last 3h (0 if missing)
-                "snow_1h": snow.get("1h", 0.0),                     # mm in last 1h (0 if missing)
-                "snow_3h": snow.get("3h", 0.0),                     # mm in last 3h (0 if missing)
-                "weather_main": weather_main,                       
-                "weather_description": weather_desc,              
-                "timestamp_utc": data.get("dt")                     
+                "temperature": main.get("temp", 15.0),
+                "feels_like": main.get("feels_like", 15.0),
+                "temp_min": main.get("temp_min", 15.0),
+                "temp_max": main.get("temp_max", 15.0),
+                "pressure": main.get("pressure", 1013.0),
+                "humidity": main.get("humidity", 50.0),
+                "wind_speed": wind.get("speed", 0.0),
+                "wind_deg": wind.get("deg", 0.0),
+                "wind_gust": wind.get("gust", 0.0),
+                "clouds_pct": clouds.get("all", 0.0),
+                "visibility": data.get("visibility", 10000),
+                "rain_1h": rain.get("1h", 0.0),
+                "rain_3h": rain.get("3h", 0.0),
+                "snow_1h": snow.get("1h", 0.0),
+                "snow_3h": snow.get("3h", 0.0),
+                "weather_main": weather_main,
+                "weather_description": weather_desc,
+                "timestamp_utc": data.get("dt", int(time.time()))
             }
+            
         elif response.status_code == 429:  # Rate limited
             if retry < MAX_RETRIES:
-                logger.warning(f"Rate limited, retrying in {RETRY_DELAY}s...")
+                wait_time = RETRY_DELAY * (retry + 1)  # Exponential backoff
+                logger.warning(f"Rate limited for {lat},{lon}. Retrying in {wait_time}s... (attempt {retry + 1}/{MAX_RETRIES})")
+                time.sleep(wait_time)
+                return get_weather(lat, lon, retry + 1)
+            else:
+                logger.error(f"Rate limit exceeded after {MAX_RETRIES} retries for {lat},{lon}")
+                return None
+                
+        elif response.status_code == 401:
+            logger.error("Invalid API key! Check OPENWEATHER_API_KEY")
+            return None
+            
+        elif response.status_code >= 500:
+            if retry < MAX_RETRIES:
+                logger.warning(f"Server error {response.status_code} for {lat},{lon}. Retrying...")
                 time.sleep(RETRY_DELAY)
                 return get_weather(lat, lon, retry + 1)
             else:
-                logger.error(f"Rate limit exceeded after {MAX_RETRIES} retries")
+                logger.error(f"Server error after {MAX_RETRIES} retries for {lat},{lon}")
                 return None
         else:
-            logger.error(f"Status code {response.status_code}")
+            logger.error(f"Unexpected status code {response.status_code} for {lat},{lon}")
             return None
+            
     except requests.Timeout:
         if retry < MAX_RETRIES:
-            logger.warning(f"Timeout, retrying...")
+            logger.warning(f"Timeout for {lat},{lon}. Retrying... (attempt {retry + 1}/{MAX_RETRIES})")
+            time.sleep(RETRY_DELAY)
+            return get_weather(lat, lon, retry + 1)
+        else:
+            logger.error(f"Timeout after {MAX_RETRIES} retries for {lat},{lon}")
+            return None
+            
+    except requests.RequestException as e:
+        logger.error(f"Request error for {lat},{lon}: {e}")
+        if retry < MAX_RETRIES:
             time.sleep(RETRY_DELAY)
             return get_weather(lat, lon, retry + 1)
         return None
+        
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Unexpected error getting weather for {lat},{lon}: {e}")
         return None
 
-# fetch weather for each station (once per unique station)
-station_weather = {}
-for station in unique_stations:  # for every station referenced by mapping.csv
-    if station in station_coords:  # if the station is in the station_coords dict above
-        lat, lon = station_coords[station]  # get lat/lon from the dict
-        weather = get_weather(lat, lon)    
-        if weather:                        
-            station_weather[station] = weather
-    else:
-        print(f"No coordinates found for station: {station}")
+# Get unique stations
+unique_stations = mapping_df["nearest_station_name"].unique()
+logger.info(f"Fetching weather for {len(unique_stations)} unique stations")
 
+# Fetch weather for each station
+station_weather = {}
+successful_fetches = 0
+failed_fetches = 0
+
+for i, station in enumerate(unique_stations, 1):
+    if station in station_coords:
+        lat, lon = station_coords[station]
+        logger.info(f"Fetching weather for {station} ({i}/{len(unique_stations)})...")
+        
+        weather = get_weather(lat, lon)
+        
+        if weather:
+            station_weather[station] = weather
+            successful_fetches += 1
+        else:
+            logger.warning(f"Failed to get weather for {station}")
+            failed_fetches += 1
+            
+        # Rate limiting: small delay between requests
+        time.sleep(0.1)
+    else:
+        logger.warning(f"No coordinates found for station: {station}")
+        failed_fetches += 1
+
+logger.info(f"Weather fetch complete: {successful_fetches} successful, {failed_fetches} failed")
+
+if successful_fetches == 0:
+    logger.error("CRITICAL: No weather data retrieved! Exiting.")
+    raise RuntimeError("Failed to retrieve any weather data")
+
+# Get Calgary time
 calgary_tz = ZoneInfo("America/Edmonton")
 calgary_time = datetime.now(calgary_tz).strftime("%Y-%m-%d %H:%M:%S")
 
-#Create output rows
+# Create output rows
 grid_weather = []
 for _, row in mapping_df.iterrows():
     station = row["nearest_station_name"]
     if station in station_weather:
-        w = station_weather[station]  #the dict returned by get_weather
-
-        # Append a row with the expanded set of fields
+        w = station_weather[station]
+        
         grid_weather.append({
             "lat": row["lat"],
             "lon": row["lon"],
-            "date": calgary_time,                      
-            "nearest_station": station,                 
+            "date": calgary_time,
+            "nearest_station": station,
             "temperature": w.get("temperature"),
             "humidity": w.get("humidity"),
             "wind_speed": w.get("wind_speed"),
@@ -180,7 +233,7 @@ for _, row in mapping_df.iterrows():
             "timestamp_utc": w.get("timestamp_utc")
         })
     else:
-        # If there's no station weather (API failed), append row with None values
+        # Station failed - use None values
         grid_weather.append({
             "lat": row["lat"],
             "lon": row["lon"],
@@ -206,14 +259,18 @@ for _, row in mapping_df.iterrows():
             "timestamp_utc": None
         })
 
-#Make sure the folder exists 
+# Ensure output directory exists
 os.makedirs("weather_data", exist_ok=True)
 
-#Save today's data as a separate CSV file 
+# Save to CSV
 today_str = datetime.now().strftime("%Y-%m-%d")
 output_path = f"weather_data/{today_str}.csv"
 
-#Convert to DataFrame and write CSV
-pd.DataFrame(grid_weather).to_csv(output_path, index=False)
-
-print(f"Saved weather for {len(grid_weather)} grid cells at {calgary_time}")
+try:
+    df_output = pd.DataFrame(grid_weather)
+    df_output.to_csv(output_path, index=False)
+    logger.info(f"✓ Saved weather for {len(grid_weather)} grid cells to {output_path}")
+    logger.info(f"✓ Data timestamp: {calgary_time}")
+except Exception as e:
+    logger.error(f"Failed to save CSV: {e}")
+    raise

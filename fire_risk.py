@@ -3,14 +3,15 @@ import numpy as np
 import joblib
 import glob 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
-import logging
 import math
+from logging_config import setup_logging, get_logger
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+setup_logging()
+logger = get_logger(__name__)
+
 
 def cleanup_old_weather_data(days_to_keep=45):
     """Delete weather data files older than specified days"""
@@ -533,6 +534,82 @@ class FireWeatherProcessor:
                     return prov
         
         return "Unknown"
+    def calculate_accumulated_fwi(self, location_history):
+        location_history = location_history.sort_values('file_date')
+        
+        # DEBUG: Track Calgary specifically
+        is_calgary = False
+        if len(location_history) > 0:
+            first_row = location_history.iloc[0]
+            if first_row.get('nearest_station') == 'Calgary':
+                is_calgary = True
+                logger.info(f"\n{'='*60}")
+                logger.info(f"CALGARY DEBUG - History length: {len(location_history)}")
+                logger.info(f"Date range: {location_history.iloc[0]['file_date']} to {location_history.iloc[-1]['file_date']}")
+                logger.info(f"{'='*60}")
+        
+        # Initialize codes
+        ffmc = 85
+        dmc = 6
+        dc = 15
+        
+        # Accumulate day by day
+        for idx, day in location_history.iterrows():
+            temp = day.get('temperature', 15)
+            humidity = day.get('humidity', 50)
+            wind = day.get('wind_speed', 10)
+            rain = (day.get('rain_1h_mm', 0) + day.get('rain_3h_mm', 0) + 
+                day.get('snow_1h_mm', 0) + day.get('snow_3h_mm', 0))
+            
+            month = datetime.now().month
+            
+            # Store old values for comparison
+            old_ffmc = ffmc
+            old_dmc = dmc
+            old_dc = dc
+            
+            # Update codes based on this day's weather
+            ffmc = self.fwi_calculator.calculate_ffmc(temp, humidity, wind, rain, ffmc)
+            dmc = self.fwi_calculator.calculate_dmc(temp, humidity, rain, dmc, month)
+            dc = self.fwi_calculator.calculate_dc(temp, rain, dc, month)
+            
+            # DEBUG: Log every day for Calgary (especially last 3 days)
+            if is_calgary and idx >= len(location_history) - 3:
+                logger.info(f"\nDate: {day.get('file_date')} | Temp: {temp}°C | Humidity: {humidity}% | Wind: {wind} km/h | Rain: {rain}mm")
+                logger.info(f"  FFMC: {old_ffmc:.1f} → {ffmc:.1f}")
+                logger.info(f"  DMC:  {old_dmc:.1f} → {dmc:.1f}")
+                logger.info(f"  DC:   {old_dc:.1f} → {dc:.1f}")
+        
+        # Calculate final indices from accumulated codes
+        isi = self.fwi_calculator.calculate_isi(wind, ffmc)
+        bui = self.fwi_calculator.calculate_bui(dmc, dc)
+        fwi = self.fwi_calculator.calculate_fwi(isi, bui)
+        dsr = 0.0272 * fwi ** 1.77
+        
+        if is_calgary:
+            logger.info(f"\n{'='*60}")
+            logger.info(f"FINAL CALGARY INDICES:")
+            logger.info(f"  FFMC: {ffmc:.1f}")
+            logger.info(f"  DMC:  {dmc:.1f}")
+            logger.info(f"  DC:   {dc:.1f}")
+            logger.info(f"  ISI:  {isi:.1f}")
+            logger.info(f"  BUI:  {bui:.1f}")
+            logger.info(f"  FWI:  {fwi:.1f}")
+            logger.info(f"  DSR:  {dsr:.1f}")
+            logger.info(f"{'='*60}\n")
+        
+        result = {
+            'ffmc': ffmc,
+            'dmc': dmc,
+            'dc': dc,
+            'isi': isi,
+            'bui': bui,
+            'fwi': fwi,
+            'dsr': dsr
+        }
+        
+        
+        return self.sanitize_dict_for_json(result)
 
 def main():
     cleanup_old_weather_data(days_to_keep=45)
@@ -542,7 +619,12 @@ def main():
     # Process with historical accumulation
     results = processor.process_all_locations()
     
-    # Save results
+    # Validate results before saving
+    if not results or len(results) == 0:
+        logger.error("CRITICAL: No results generated from FWI processing!")
+        raise ValueError("No fire risk predictions generated")
+    
+    # Build API response
     api_response = {
         "success": True,
         "data": results,
@@ -561,24 +643,65 @@ def main():
         "last_updated": processing_timestamp
     }
     
-    #Sanitize the entire response
+    # Sanitize the entire response
     api_response_sanitized = processor.sanitize_dict_for_json(api_response)
     
-    with open("fwi_predictions.json", "w") as f:
-        json.dump(api_response_sanitized, f, indent=2)
+    # Validate sanitized data
+    try:
+        # Test if it can be JSON serialized
+        json.dumps(api_response_sanitized)
+    except (TypeError, ValueError) as e:
+        logger.error(f"Data validation failed - cannot serialize to JSON: {e}")
+        raise ValueError(f"Invalid data structure for JSON: {e}")
+    
+    # Save predictions with error handling
+    try:
+        with open("fwi_predictions.json", "w") as f:
+            json.dump(api_response_sanitized, f, indent=2)
+        logger.info("✓ Saved predictions to fwi_predictions.json")
+    except IOError as e:
+        logger.error(f"Failed to write fwi_predictions.json: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error saving predictions: {e}")
+        raise
+    
+    # Verify the file was written correctly
+    try:
+        with open("fwi_predictions.json", "r") as f:
+            verification = json.load(f)
+        if not verification.get("data"):
+            raise ValueError("Saved file is missing data!")
+        logger.info(f"✓ Verified predictions file: {len(verification['data'])} records")
+    except Exception as e:
+        logger.error(f"Prediction file verification failed: {e}")
+        raise
     
     # Save system components
-    os.makedirs("model_components", exist_ok=True)
-    joblib.dump(processor, "model_components/fire_risk_model.pkl")
+    try:
+        os.makedirs("model_components", exist_ok=True)
+        
+        # Save processor
+        joblib.dump(processor, "model_components/fire_risk_model.pkl")
+        logger.info("✓ Saved fire risk model")
+        
+        # Save features
+        features = ['temperature', 'humidity', 'wind_speed', 'pressure', 'rain_1h_mm', 'rain_3h_mm', 'historical_fire']
+        joblib.dump(features, "model_components/model_features.pkl")
+        logger.info("✓ Saved model features")
+        
+        # Save dummy encoder
+        from sklearn.preprocessing import LabelEncoder
+        dummy_encoder = LabelEncoder()
+        dummy_encoder.classes_ = np.array(['Clear', 'Clouds', 'Rain'])
+        joblib.dump(dummy_encoder, "model_components/weather_encoder.pkl")
+        logger.info("✓ Saved weather encoder")
+        
+    except Exception as e:
+        logger.error(f"Failed to save model components: {e}")
+        # Don't raise - predictions are more critical
     
-    features = ['temperature', 'humidity', 'wind_speed', 'pressure', 'rain_1h_mm', 'rain_3h_mm', 'historical_fire']
-    joblib.dump(features, "model_components/model_features.pkl")
-    
-    from sklearn.preprocessing import LabelEncoder
-    dummy_encoder = LabelEncoder()
-    dummy_encoder.classes_ = np.array(['Clear', 'Clouds', 'Rain'])
-    joblib.dump(dummy_encoder, "model_components/weather_encoder.pkl")
-    
+    # Save system info
     system_info = {
         "model_type": "Canadian Fire Weather Index System",
         "methodology": "45-Day Historical Weather Accumulation",
@@ -590,14 +713,18 @@ def main():
         "version": "FWI_2.0_Historical"
     }
     
-    with open("model_info.json", "w") as f:
-        json.dump(system_info, f, indent=2)
-    
-    print("=" * 70)
-    print("Fire Weather Index System Ready!")
-    print(f"✓ Processing completed at: {processing_timestamp}")
-    print(f"✓ Using {len(glob.glob('weather_data/*.csv'))} days of historical data")
-    print("=" * 70)
+    try:
+        with open("model_info.json", "w") as f:
+            json.dump(system_info, f, indent=2)
+        logger.info("✓ Saved model info")
+    except Exception as e:
+        logger.error(f"Failed to save model_info.json: {e}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.error(f"FATAL ERROR: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise

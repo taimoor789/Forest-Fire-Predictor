@@ -4,6 +4,10 @@ import sys
 import time
 from pathlib import Path
 from datetime import datetime
+from logging_config import setup_logging, get_logger, cleanup_old_logs
+
+setup_logging()
+logger = get_logger(__name__)
 
 # Change to script directory so file paths work correctly
 script_dir = Path(__file__).parent.absolute()
@@ -105,6 +109,8 @@ def main():
             print("\n Fire Weather Index pipeline failed, but continuing with API server...")
         else:
             print("\n✓ Fire Weather Index calculations complete")
+        
+        cleanup_old_logs(days_to_keep=30)
         
         # Step 2: Start the API server
         server_process = start_api_server()

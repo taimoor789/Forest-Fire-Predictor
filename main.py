@@ -1,8 +1,8 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, validator
+from typing import Optional, List
 import joblib
-import pandas as pd
-import numpy as np
 import os
 from datetime import datetime
 import glob
@@ -10,12 +10,77 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-import logging
 from contextlib import asynccontextmanager
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+STARTUP_TIME = datetime.now()
+
+# Use centralized logging
+from logging_config import setup_logging, get_logger
+
+setup_logging(console_output=True, file_output=True)
+logger = get_logger(__name__)
+
+# Pydantic models for request/response validation
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: str
+    system_type: str
+    system_loaded: bool
+    weather_data_available: bool = False
+    last_updated: Optional[str] = None
+
+class ModelInfoResponse(BaseModel):
+    model_type: str
+    methodology: str
+    r2_score: float
+    mse: float
+    mae: float
+    risk_range: List[float]
+    features: List[str]
+    version: str
+    last_trained: str
+    training_records: int = 0
+    confidence: str
+
+class SystemReloadResponse(BaseModel):
+    success: bool
+    message: str
+    timestamp: str
+
+class ErrorResponse(BaseModel):
+    detail: str
+    error_code: Optional[str] = None
+    timestamp: str
+
+class DataFreshnessStatus(BaseModel):
+    is_fresh: bool
+    age_hours: float
+    last_updated: str
+    status: str  # "fresh", "stale", "missing"
+
+class ComponentHealth(BaseModel):
+    name: str
+    status: str  # "healthy", "degraded", "unhealthy"
+    message: str
+
+class DetailedHealthResponse(BaseModel):
+    status: str  # "healthy", "degraded", "unhealthy"
+    timestamp: str
+    system_type: str
+    system_loaded: bool
+    components: List[ComponentHealth]
+    data_freshness: DataFreshnessStatus
+    uptime_seconds: Optional[float] = None
+
+# Request validation models
+class RetrainRequest(BaseModel):
+    force: bool = Field(default=False, description="Force retrain even if recent data exists")
+    
+    @validator('force')
+    def validate_force(cls, v):
+        if not isinstance(v, bool):
+            raise ValueError('force must be a boolean')
+        return v
 
 # Global variables for system components
 fire_weather_processor = None
@@ -26,19 +91,19 @@ system_info_data = None
 async def lifespan(app: FastAPI):
     # Startup
     global fire_weather_processor, system_info_data
+    logger.info("=" * 70)
     logger.info("Loading Fire Weather Index System...")
     
     try: 
-        # Don't load the processor - we'll just use cached JSON results
-        fire_weather_processor = True  # Just a flag that system is ready
+        fire_weather_processor = True  # Flag that system is ready
         
         # Load system info from JSON file
         try: 
             with open("model_info.json", "r") as f:
                 system_info_data = json.load(f)
-                logger.info(f"Fire Weather Index System loaded successfully")
+                logger.info("Fire Weather Index System loaded successfully")
         except FileNotFoundError:
-            logger.warning("model_info.json not found")
+            logger.warning("model_info.json not found - using defaults")
             system_info_data = {
                 "model_type": "Canadian Fire Weather Index System",
                 "methodology": "45-Day Historical Weather Accumulation",
@@ -49,8 +114,11 @@ async def lifespan(app: FastAPI):
         logger.error(f"Fire Weather System loading error: {e}")
         fire_weather_processor = None
     
-    yield  # This separates startup from shutdown
-    # Shutdown code would go here (if needed)
+    logger.info("=" * 70)
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down Fire Weather Index System")
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
@@ -60,118 +128,342 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Enable Cross-Origin Resource Sharing
+# Enable CORS with validation
+ALLOWED_ORIGINS = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'https://yourdomain.com'  # Add your production domain
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['http://localhost:3000', 'http://localhost:3001'], 
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
+    allow_methods=["GET", "POST"],  # Specific methods only
+    allow_headers=["*"],
+    max_age=3600  # Cache preflight requests for 1 hour
 )
 
-def get_latest_weather():
-    """Load the most recent weather data file"""
-    weather_files = glob.glob("weather_data/*.csv")   
-    if not weather_files:
-        raise HTTPException(status_code=500, detail="No weather data found")
-    
-    latest_file = max(weather_files, key=os.path.getctime)
-    try:
-        df = pd.read_csv(latest_file)
-        logger.info(f"Loaded weather data: {len(df)} locations from {os.path.basename(latest_file)}")
-        return df, latest_file
-    except Exception as e:
-        logger.error(f"Error reading weather data: {e}")
-        raise HTTPException(status_code=500, detail=f"Error reading weather data: {str(e)}")
-
-def get_province_from_coordinates(lat, lon):
-    """Enhanced province mapping"""
-    province_bounds = {
-        'BC': (48.0, -139.0, 60.0, -114.0),
-        'AB': (49.0, -120.0, 60.0, -110.0),
-        'SK': (49.0, -110.0, 60.0, -102.0), 
-        'MB': (49.0, -102.0, 60.0, -89.0),
-        'ON': (41.7, -95.0, 56.9, -74.3),
-        'QC': (45.0, -79.8, 62.6, -57.1),
-        'NB': (44.6, -69.1, 48.1, -63.7),
-        'NS': (43.4, -66.4, 47.1, -59.7),
-        'PE': (45.9, -64.4, 47.1, -62.0),
-        'NL': (46.6, -67.8, 60.4, -52.6),
-        'YT': (60.0, -141.0, 69.6, -124.0),
-        'NT': (60.0, -136.0, 78.8, -102.0),
-        'NU': (60.0, -110.0, 83.1, -61.0)
+# Helper function for error responses
+def create_error_response(detail: str, error_code: Optional[str] = None) -> dict:
+    return {
+        "detail": detail,
+        "error_code": error_code,
+        "timestamp": datetime.now().isoformat()
     }
-    
-    for province, (min_lat, min_lon, max_lat, max_lon) in province_bounds.items():
-        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
-            return province
-    return "Unknown"
 
 @app.get("/")
 async def root():
+    """Root endpoint"""
     return {
         "message": "Forest Fire Risk Prediction API", 
         "version": "2.0.0", 
         "system": "Canadian Fire Weather Index",
-        "status": "running"
+        "status": "running",
+        "documentation": "/docs"
     }
 
-@app.get("/health")
+@app.get("/health", response_model=DetailedHealthResponse)
 async def health_check():
-    weather_available = len(glob.glob("weather_data/*.csv")) > 0
+    """
+    Comprehensive health check endpoint.
+    Returns detailed status of all system components.
+    """
+    components = []
+    overall_status = "healthy"
     
-    return {
-        "status": "healthy" if fire_weather_processor else "system_not_loaded",
-        "timestamp": datetime.now().isoformat(),
-        "system_loaded": fire_weather_processor is not None,
-        "weather_data_available": weather_available,
-        "system_type": "Canadian Fire Weather Index System",
-        "last_updated": system_info_data.get("last_trained", "unknown") if system_info_data else "unknown"
-    }
+    # 1. Check if system is loaded
+    if fire_weather_processor:
+        components.append(ComponentHealth(
+            name="Fire Weather Processor",
+            status="healthy",
+            message="System loaded and ready"
+        ))
+    else:
+        components.append(ComponentHealth(
+            name="Fire Weather Processor",
+            status="unhealthy",
+            message="System not loaded"
+        ))
+        overall_status = "unhealthy"
+    
+    # 2. Check weather data availability
+    try:
+        weather_files = glob.glob("weather_data/*.csv")
+        if len(weather_files) > 0:
+            latest_file = max(weather_files, key=os.path.getmtime)
+            file_age = (datetime.now().timestamp() - os.path.getmtime(latest_file)) / 3600
+            
+            if file_age < 2:  # Less than 2 hours old
+                components.append(ComponentHealth(
+                    name="Weather Data",
+                    status="healthy",
+                    message=f"{len(weather_files)} files available, latest is {file_age:.1f}h old"
+                ))
+            elif file_age < 24:  # Less than 24 hours old
+                components.append(ComponentHealth(
+                    name="Weather Data",
+                    status="degraded",
+                    message=f"Latest data is {file_age:.1f}h old (expected <2h)"
+                ))
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+            else:
+                components.append(ComponentHealth(
+                    name="Weather Data",
+                    status="unhealthy",
+                    message=f"Latest data is {file_age:.1f}h old (stale!)"
+                ))
+                overall_status = "unhealthy"
+        else:
+            components.append(ComponentHealth(
+                name="Weather Data",
+                status="unhealthy",
+                message="No weather data files found"
+            ))
+            overall_status = "unhealthy"
+    except Exception as e:
+        components.append(ComponentHealth(
+            name="Weather Data",
+            status="unhealthy",
+            message=f"Error checking weather data: {str(e)}"
+        ))
+        overall_status = "unhealthy"
+    
+    # 3. Check predictions file
+    try:
+        if os.path.exists("fwi_predictions.json"):
+            file_size = os.path.getsize("fwi_predictions.json")
+            file_age = (datetime.now().timestamp() - os.path.getmtime("fwi_predictions.json")) / 3600
+            
+            if file_size < 1024:  # Less than 1KB is suspicious
+                components.append(ComponentHealth(
+                    name="Predictions Cache",
+                    status="unhealthy",
+                    message=f"Predictions file suspiciously small ({file_size} bytes)"
+                ))
+                overall_status = "unhealthy"
+            elif file_age < 2:
+                components.append(ComponentHealth(
+                    name="Predictions Cache",
+                    status="healthy",
+                    message=f"Predictions are {file_age:.1f}h old"
+                ))
+            elif file_age < 24:
+                components.append(ComponentHealth(
+                    name="Predictions Cache",
+                    status="degraded",
+                    message=f"Predictions are {file_age:.1f}h old (expected <2h)"
+                ))
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+            else:
+                components.append(ComponentHealth(
+                    name="Predictions Cache",
+                    status="unhealthy",
+                    message=f"Predictions are {file_age:.1f}h old (stale!)"
+                ))
+                overall_status = "unhealthy"
+            
+            # Validate JSON structure
+            try:
+                with open("fwi_predictions.json", "r") as f:
+                    pred_data = json.load(f)
+                if not pred_data.get("data"):
+                    components.append(ComponentHealth(
+                        name="Predictions Validation",
+                        status="unhealthy",
+                        message="Predictions file has no data"
+                    ))
+                    overall_status = "unhealthy"
+                else:
+                    components.append(ComponentHealth(
+                        name="Predictions Validation",
+                        status="healthy",
+                        message=f"{len(pred_data['data'])} predictions available"
+                    ))
+            except json.JSONDecodeError:
+                components.append(ComponentHealth(
+                    name="Predictions Validation",
+                    status="unhealthy",
+                    message="Predictions file is corrupted (invalid JSON)"
+                ))
+                overall_status = "unhealthy"
+        else:
+            components.append(ComponentHealth(
+                name="Predictions Cache",
+                status="unhealthy",
+                message="Predictions file not found"
+            ))
+            overall_status = "unhealthy"
+    except Exception as e:
+        components.append(ComponentHealth(
+            name="Predictions Cache",
+            status="unhealthy",
+            message=f"Error checking predictions: {str(e)}"
+        ))
+        overall_status = "unhealthy"
+    
+    # 4. Check model components
+    required_files = [
+        "model_components/fire_risk_model.pkl",
+        "model_info.json"
+    ]
+    
+    missing_files = []
+    for file_path in required_files:
+        if not os.path.exists(file_path):
+            missing_files.append(file_path)
+    
+    if missing_files:
+        components.append(ComponentHealth(
+            name="Model Components",
+            status="unhealthy",
+            message=f"Missing files: {', '.join(missing_files)}"
+        ))
+        overall_status = "unhealthy"
+    else:
+        components.append(ComponentHealth(
+            name="Model Components",
+            status="healthy",
+            message="All model files present"
+        ))
+    
+    # 5. Data freshness summary
+    data_freshness_status = DataFreshnessStatus(
+        is_fresh=False,
+        age_hours=0.0,
+        last_updated="unknown",
+        status="missing"
+    )
+    
+    if system_info_data and "last_trained" in system_info_data:
+        try:
+            last_updated_dt = datetime.fromisoformat(system_info_data["last_trained"].replace('Z', '+00:00'))
+            age_hours = (datetime.now(last_updated_dt.tzinfo or None) - last_updated_dt).total_seconds() / 3600
+            
+            data_freshness_status = DataFreshnessStatus(
+                is_fresh=age_hours < 2,
+                age_hours=round(age_hours, 2),
+                last_updated=system_info_data["last_trained"],
+                status="fresh" if age_hours < 2 else ("stale" if age_hours < 24 else "very_stale")
+            )
+        except Exception:
+            data_freshness_status.last_updated = system_info_data.get("last_trained", "unknown")
+            
+    uptime = (datetime.now() - STARTUP_TIME).total_seconds()
+    
+    return DetailedHealthResponse(
+        status=overall_status,
+        timestamp=datetime.now().isoformat(),
+        system_type="Canadian Fire Weather Index System",
+        system_loaded=fire_weather_processor is not None,
+        components=components,
+        data_freshness=data_freshness_status,
+        uptime_seconds=round(uptime, 2)
+    )
 
-@app.get("/api/model/info")
+@app.get("/api/model/info", response_model=ModelInfoResponse)
 async def get_model_info():
+    """Get model information and statistics"""
     if not fire_weather_processor:
-        raise HTTPException(status_code=500, detail="Fire Weather System not loaded")
+        raise HTTPException(
+            status_code=503,
+            detail="Fire Weather System not loaded"
+        )
     
-    return {
-        "model_type": system_info_data.get("model_type", "Canadian Fire Weather Index System"),
-        "methodology": system_info_data.get("methodology", "Environment and Climate Change Canada Official Algorithm"),
-        "r2_score": system_info_data.get("r2_score", 0.95),
-        "mse": system_info_data.get("mse", 0.001),
-        "mae": system_info_data.get("mae", 0.01),
-        "risk_range": system_info_data.get("risk_range", [0.05, 0.95]),
-        "features": ["FFMC", "DMC", "DC", "ISI", "BUI", "FWI", "Temperature", "Humidity", "Wind", "Precipitation"],
-        "version": "2.0.0",
-        "last_trained": system_info_data.get("last_trained", "unknown"),
-        "training_records": system_info_data.get("processing_stats", {}).get("processed_successfully", 0),
-        "confidence": "High - Based on established fire weather science"
-    }
+    try:
+        training_records = 0
+        if system_info_data and "processing_stats" in system_info_data:
+            training_records = system_info_data["processing_stats"].get("processed_successfully", 0)
+        
+        return ModelInfoResponse(
+            model_type=system_info_data.get("model_type", "Canadian Fire Weather Index System"),
+            methodology=system_info_data.get("methodology", "Environment and Climate Change Canada Official Algorithm"),
+            r2_score=system_info_data.get("r2_score", 0.95),
+            mse=system_info_data.get("mse", 0.001),
+            mae=system_info_data.get("mae", 0.01),
+            risk_range=system_info_data.get("risk_range", [0.05, 0.95]),
+            features=["FFMC", "DMC", "DC", "ISI", "BUI", "FWI", "Temperature", "Humidity", "Wind", "Precipitation"],
+            version="2.0.0",
+            last_trained=system_info_data.get("last_trained", "unknown"),
+            training_records=training_records,
+            confidence="High - Based on established fire weather science"
+        )
+    except Exception as e:
+        logger.error(f"Error getting model info: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve model information")
 
 @app.get("/api/predict/fire-risk")
 async def get_fire_risk_predictions():
+    """Get fire risk predictions with validation"""
     if not fire_weather_processor:
-        raise HTTPException(status_code=500, detail="Fire Weather System not loaded")
+        raise HTTPException(
+            status_code=503,
+            detail="Fire Weather System not loaded"
+        )
     
     try: 
         # Load cached predictions
         try:
             with open("fwi_predictions.json", "r") as f:
                 cached_predictions = json.load(f)
-            logger.info("Returning Fire Weather Index predictions")
+            
+            # Validate response structure
+            if not cached_predictions.get("success"):
+                raise ValueError("Invalid prediction data structure")
+            
+            if not cached_predictions.get("data"):
+                raise ValueError("No prediction data available")
+            
+            logger.info(f"Returning {len(cached_predictions['data'])} Fire Weather Index predictions")
             return cached_predictions
+            
         except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="No predictions available - run fire_risk.py first")
+            logger.error("No predictions available - fwi_predictions.json not found")
+            raise HTTPException(
+                status_code=404,
+                detail="No predictions available - run fire_risk.py first"
+            )
+        except json.JSONDecodeError as e:
+            logger.error(f"Corrupted predictions file: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="Prediction data is corrupted"
+            )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Fire risk prediction failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Fire risk prediction failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Fire risk prediction failed: {str(e)}"
+        )
 
-@app.post("/api/system/retrain")
-async def retrain_system():
+@app.post("/api/system/retrain", response_model=SystemReloadResponse)
+async def retrain_system(request: Optional[RetrainRequest] = None):
     """Trigger the data pipeline to refresh weather data and recalculate fire weather indices"""
+    
+    # Validate request
+    if request is None:
+        request = RetrainRequest()
+    
     try:
         logger.info("Triggering fire weather system refresh...")
+        
+        # Check if recent data exists
+        if not request.force:
+            prediction_file = "fwi_predictions.json"
+            if os.path.exists(prediction_file):
+                file_age = datetime.now().timestamp() - os.path.getmtime(prediction_file)
+                if file_age < 3600:  # Less than 1 hour old
+                    logger.info("Recent predictions exist, skipping retrain")
+                    return SystemReloadResponse(
+                        success=True,
+                        message="Recent predictions already exist (use force=true to override)",
+                        timestamp=datetime.now().isoformat()
+                    )
         
         result = subprocess.run(
             [sys.executable, "daily_update.py", "--pipeline-only"],
@@ -191,16 +483,17 @@ async def retrain_system():
             logger.info("Fire Weather System reloaded successfully")
         except Exception as e:
             logger.error(f"Failed to reload system after refresh: {e}")
+            raise HTTPException(status_code=500, detail="System refresh succeeded but reload failed")
 
-        return {
-            "success": True, 
-            "message": "Fire Weather System refreshed successfully",
-            "timestamp": datetime.now().isoformat()
-        }
+        return SystemReloadResponse(
+            success=True,
+            message="Fire Weather System refreshed successfully",
+            timestamp=datetime.now().isoformat()
+        )
         
     except subprocess.TimeoutExpired:
         logger.error("System refresh timed out")
-        raise HTTPException(status_code=500, detail="System refresh timed out")
+        raise HTTPException(status_code=504, detail="System refresh timed out (>5 minutes)")
     except subprocess.CalledProcessError as e:
         logger.error(f"System refresh failed: {e.stderr}")
         raise HTTPException(status_code=500, detail=f"System refresh failed: {e.stderr}")
@@ -208,7 +501,7 @@ async def retrain_system():
         logger.error(f"System refresh error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"System refresh error: {str(e)}")
 
-@app.post("/api/system/reload")
+@app.post("/api/system/reload", response_model=SystemReloadResponse)
 async def reload_system():
     """Reload the Fire Weather System components without refreshing weather data"""
     try: 
@@ -220,11 +513,14 @@ async def reload_system():
             system_info_data = json.load(f)
             
         logger.info("Fire Weather System reloaded successfully")
-        return {
-            "success": True, 
-            "message": "Fire Weather System reloaded successfully",
-            "timestamp": datetime.now().isoformat()
-        }
+        return SystemReloadResponse(
+            success=True,
+            message="Fire Weather System reloaded successfully",
+            timestamp=datetime.now().isoformat()
+        )
+    except FileNotFoundError as e:
+        logger.error(f"Required file not found: {e}")
+        raise HTTPException(status_code=404, detail=f"Required system file not found: {str(e)}")
     except Exception as e:
         logger.error(f"System reload failed: {e}")
         raise HTTPException(status_code=500, detail=f"System reload failed: {str(e)}")
@@ -233,30 +529,34 @@ async def reload_system():
 async def get_system_stats():
     """Get detailed system processing statistics"""
     if not system_info_data:
-        raise HTTPException(status_code=500, detail="System info not available")
+        raise HTTPException(status_code=503, detail="System info not available")
     
-    # Get cache info if available
-    cache_status = {"predictions_cached": False, "cache_age_hours": None}
-    if os.path.exists("fwi_predictions.json"):
-        cache_status["predictions_cached"] = True
-        try:
-            cache_time = os.path.getmtime("fwi_predictions.json")
-            cache_age = (datetime.now().timestamp() - cache_time) / 3600
-            cache_status["cache_age_hours"] = round(cache_age, 1)
-        except Exception:
-            cache_status["cache_age_hours"] = "unknown"
-    
-    return {
-        "system_info": system_info_data,
-        "weather_files_available": len(glob.glob("weather_data/*.csv")),
-        "current_time": datetime.now().isoformat(),
-        "cache_status": cache_status,
-        "system_status": {
-            "processor_loaded": fire_weather_processor is not None,
-            "last_calculation": system_info_data.get("last_trained", "unknown") if system_info_data else "unknown",
-            "system_type": "Canadian Fire Weather Index"
+    try:
+        # Get cache info if available
+        cache_status = {"predictions_cached": False, "cache_age_hours": None}
+        if os.path.exists("fwi_predictions.json"):
+            cache_status["predictions_cached"] = True
+            try:
+                cache_time = os.path.getmtime("fwi_predictions.json")
+                cache_age = (datetime.now().timestamp() - cache_time) / 3600
+                cache_status["cache_age_hours"] = round(cache_age, 1)
+            except Exception:
+                cache_status["cache_age_hours"] = "unknown"
+        
+        return {
+            "system_info": system_info_data,
+            "weather_files_available": len(glob.glob("weather_data/*.csv")),
+            "current_time": datetime.now().isoformat(),
+            "cache_status": cache_status,
+            "system_status": {
+                "processor_loaded": fire_weather_processor is not None,
+                "last_calculation": system_info_data.get("last_trained", "unknown") if system_info_data else "unknown",
+                "system_type": "Canadian Fire Weather Index"
+            }
         }
-    }
+    except Exception as e:
+        logger.error(f"Error getting system stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve system statistics")
 
 @app.get("/api/danger-classes")
 async def get_danger_classes():
@@ -272,63 +572,6 @@ async def get_danger_classes():
         ],
         "system": "Canadian Fire Weather Index",
         "authority": "Environment and Climate Change Canada"
-    }
-
-# Additional utility endpoints for monitoring and debugging
-
-@app.get("/api/weather/latest")
-async def get_latest_weather_info():
-    """Get information about the latest weather data file"""
-    try:
-        weather_files = glob.glob("weather_data/*.csv")
-        if not weather_files:
-            raise HTTPException(status_code=404, detail="No weather data files found")
-        
-        latest_file = max(weather_files, key=os.path.getctime)
-        file_stats = os.stat(latest_file)
-        
-        # Get basic info about the file
-        try:
-            df = pd.read_csv(latest_file)
-            sample_data = df.head(3).to_dict('records') if len(df) > 0 else []
-        except Exception as e:
-            sample_data = []
-            df = pd.DataFrame()
-        
-        return {
-            "file_path": latest_file,
-            "file_name": os.path.basename(latest_file),
-            "file_size_mb": round(file_stats.st_size / (1024 * 1024), 2),
-            "created_time": datetime.fromtimestamp(file_stats.st_ctime).isoformat(),
-            "modified_time": datetime.fromtimestamp(file_stats.st_mtime).isoformat(),
-            "total_locations": len(df),
-            "columns": list(df.columns) if len(df) > 0 else [],
-            "sample_data": sample_data
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving weather info: {str(e)}")
-
-@app.get("/api/system/version")
-async def get_system_version():
-    """Get detailed version and component information"""
-    return {
-        "api_version": "2.0.0",
-        "fire_weather_system": "Canadian Fire Weather Index",
-        "components": {
-            "fire_weather_processor": fire_weather_processor is not None,
-            "system_info_available": system_info_data is not None,
-            "weather_data_available": len(glob.glob("weather_data/*.csv")) > 0
-        },
-        "build_info": {
-            "python_version": sys.version,
-            "build_time": datetime.now().isoformat(),
-            "dependencies": {
-                "fastapi": "Available",
-                "pandas": "Available", 
-                "numpy": "Available",
-                "joblib": "Available"
-            }
-        }
     }
 
 if __name__ == "__main__":
