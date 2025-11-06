@@ -2,7 +2,7 @@ cron_logs.txt
 
 config.json
 
-model_component/
+model_components/
 
 weather_data/
 
@@ -24,3 +24,4 @@ logs/
 /requirements.txt
 /model_info.json
 /forest-fire-api.zip
+/deployment.zip

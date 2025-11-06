@@ -120,7 +120,24 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down Fire Weather Index System")
 
-# Initialize FastAPI app with lifespan
+#CORS Settings - Allow both local and production
+ALLOWED_ORIGINS = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+]
+
+# Add production domains from environment variables
+VERCEL_DOMAIN = os.environ.get('VERCEL_DOMAIN')
+CUSTOM_DOMAIN = os.environ.get('CUSTOM_DOMAIN')
+
+if VERCEL_DOMAIN:
+    ALLOWED_ORIGINS.append(f'https://{VERCEL_DOMAIN}')
+    ALLOWED_ORIGINS.append(f'https://{VERCEL_DOMAIN.replace(".vercel.app", "")}.vercel.app')
+
+if CUSTOM_DOMAIN:
+    ALLOWED_ORIGINS.append(f'https://{CUSTOM_DOMAIN}')
+    ALLOWED_ORIGINS.append(f'http://{CUSTOM_DOMAIN}')
+
 app = FastAPI(
     title="Forest Fire Risk Prediction API", 
     description="Production fire risk assessment using Canadian Fire Weather Index System",
@@ -128,21 +145,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Enable CORS with validation
-ALLOWED_ORIGINS = [
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'https://yourdomain.com'  # Add your production domain
-]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],  # Specific methods only
+    allow_methods=["GET", "POST", "OPTIONS"],  # Add OPTIONS for preflight
     allow_headers=["*"],
-    max_age=3600  # Cache preflight requests for 1 hour
+    max_age=3600
 )
+
+print(f"CORS Allowed Origins: {ALLOWED_ORIGINS}")  # Debug log
 
 # Helper function for error responses
 def create_error_response(detail: str, error_code: Optional[str] = None) -> dict:
