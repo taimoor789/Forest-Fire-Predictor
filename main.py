@@ -124,9 +124,10 @@ async def lifespan(app: FastAPI):
 ALLOWED_ORIGINS = [
     'http://localhost:3000',
     'http://localhost:3001',
+    'https://fire-risk-predictor.vercel.app',
+    'https://d1aexr3nj3xzld.cloudfront.net',  
 ]
 
-# Add production domains from environment variables
 VERCEL_DOMAIN = os.environ.get('VERCEL_DOMAIN')
 CUSTOM_DOMAIN = os.environ.get('CUSTOM_DOMAIN')
 
