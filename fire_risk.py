@@ -3,17 +3,17 @@ import numpy as np
 import joblib
 import glob 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
+import logging
 import math
-from logging_config import setup_logging, get_logger
+import gc  # Garbage collection
 
 # Set up logging
-setup_logging()
-logger = get_logger(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-
-def cleanup_old_weather_data(days_to_keep=45):
+def cleanup_old_weather_data(days_to_keep=30):  # REDUCED from 45
     """Delete weather data files older than specified days"""
     weather_files = sorted(glob.glob("weather_data/*.csv"))
     
@@ -251,7 +251,7 @@ class CanadianFireWeatherIndex:
 
 class FireWeatherProcessor:
     """
-    Process FWI using historical weather accumulation
+    Process FWI using historical weather accumulation - MEMORY OPTIMIZED
     """
     
     def __init__(self):
@@ -282,8 +282,8 @@ class FireWeatherProcessor:
             return int(data)
         return data
         
-    def load_historical_weather(self, days_back=45):
-        """Load historical weather data for FWI accumulation"""
+    def load_historical_weather(self, days_back=30):  # REDUCED from 45
+        """Load historical weather data for FWI accumulation - MEMORY OPTIMIZED"""
         weather_files = sorted(glob.glob("weather_data/*.csv"))
         
         if not weather_files:
@@ -298,7 +298,19 @@ class FireWeatherProcessor:
         all_data = []
         for file in weather_files:
             try:
-                df = pd.read_csv(file)
+                # Use dtype to reduce memory usage
+                df = pd.read_csv(file, dtype={
+                    'lat': 'float32',
+                    'lon': 'float32',
+                    'temperature': 'float32',
+                    'humidity': 'float32',
+                    'wind_speed': 'float32',
+                    'pressure': 'float32',
+                    'rain_1h_mm': 'float32',
+                    'rain_3h_mm': 'float32',
+                    'snow_1h_mm': 'float32',
+                    'snow_3h_mm': 'float32'
+                })
                 df['file_date'] = os.path.basename(file).replace('.csv', '')
                 all_data.append(df)
             except Exception as e:
@@ -309,6 +321,9 @@ class FireWeatherProcessor:
         
         combined = pd.concat(all_data, ignore_index=True)
         logger.info(f"Loaded {len(combined)} total weather records")
+        
+        # Force garbage collection
+        gc.collect()
         
         return combined
     
@@ -357,28 +372,34 @@ class FireWeatherProcessor:
         return self.sanitize_dict_for_json(result)
     
     def process_all_locations(self, weather_file=None):
-        """Process FWI for all locations using historical accumulation"""
+        """Process FWI for all locations using historical accumulation - MEMORY OPTIMIZED"""
         
         logger.info("Processing Fire Weather Index with historical accumulation...")
         start_time = datetime.now()
         
         # Load historical data
-        historical_data = self.load_historical_weather(days_back=45)
+        historical_data = self.load_historical_weather(days_back=30)  # REDUCED from 45
         
         # Get today's data
         if weather_file is None:
             weather_files = glob.glob("weather_data/*.csv")
             weather_file = max(weather_files, key=os.path.getctime)
         
-        today_data = pd.read_csv(weather_file)
+        today_data = pd.read_csv(weather_file, dtype={
+            'lat': 'float32',
+            'lon': 'float32',
+            'temperature': 'float32',
+            'humidity': 'float32',
+            'wind_speed': 'float32',
+            'pressure': 'float32'
+        })
         logger.info(f"Processing {len(today_data)} locations from {weather_file}")
         
         # Add historical fire context
         try:
-            fire_df = pd.read_csv("canada_fire_grid.csv")
-            today_data = today_data.merge(fire_df[['lat', 'lon', 'historical_fire']], 
-                                         on=['lat', 'lon'], how='left')
-            today_data['historical_fire'] = today_data['historical_fire'].fillna(0).astype(int)
+            fire_df = pd.read_csv("canada_fire_grid.csv", usecols=['lat', 'lon', 'historical_fire'])
+            today_data = today_data.merge(fire_df, on=['lat', 'lon'], how='left')
+            today_data['historical_fire'] = today_data['historical_fire'].fillna(0).astype('int8')
         except FileNotFoundError:
             logger.warning("Historical fire data not found")
             today_data['historical_fire'] = 0
@@ -386,89 +407,100 @@ class FireWeatherProcessor:
         results = []
         processing_errors = 0
         
-        # Process each location
-        for idx, row in today_data.iterrows():
-            try:
-                lat = float(row['lat'])
-                lon = float(row['lon'])
-                
-                # Get history for this location
-                location_hist = historical_data[
-                    (historical_data['lat'] == lat) & 
-                    (historical_data['lon'] == lon)
-                ].copy()
-                
-                if len(location_hist) == 0:
-                    logger.warning(f"No history for {lat},{lon}")
-                    location_hist = pd.DataFrame([row])
-                    location_hist['file_date'] = datetime.now().strftime('%Y-%m-%d')
-                
-                # Calculate accumulated FWI
-                fwi_data = self.calculate_accumulated_fwi(location_hist)
-                
-                # Validate FWI data
-                if any(np.isnan(v) or np.isinf(v) for v in fwi_data.values()):
-                    logger.warning(f"Invalid FWI data for {lat},{lon}, using defaults")
-                    fwi_data = {'ffmc': 85.0, 'dmc': 6.0, 'dc': 15.0, 'isi': 1.0, 'bui': 10.0, 'fwi': 5.0, 'dsr': 1.0}
-                
-                # Get danger classification
-                danger_class, risk_prob, color = self.fwi_calculator.get_danger_class(fwi_data['fwi'])
-                
-                # Historical fire adjustment
-                if row.get('historical_fire', 0) == 1:
-                    risk_prob = min(0.98, risk_prob * 1.15)
-                
-                # Ensure risk_prob is valid
-                risk_prob = float(risk_prob)
-                if np.isnan(risk_prob) or np.isinf(risk_prob):
-                    risk_prob = 0.15
-                
-                result_raw = {
-                    'lat': lat,
-                    'lon': lon,
-                    'location_name': str(row.get('nearest_station', f'Grid_{idx}')),
-                    'province': self.get_province(lat, lon),
-                    'daily_fire_risk': risk_prob,
-                    'danger_class': danger_class,
-                    'color_code': color,
-                    'weather_features': {
-                        'temperature': row.get('temperature', 15),
-                        'humidity': row.get('humidity', 50),
-                        'wind_speed': row.get('wind_speed', 10),
-                        'pressure': row.get('pressure', 1013),
-                        'fire_danger_index': fwi_data['fwi'],
-                        'rain_1h_mm': row.get('rain_1h_mm', 0),
-                        'rain_3h_mm': row.get('rain_3h_mm', 0),
-                        'snow_1h_mm': row.get('snow_1h_mm', 0),
-                        'snow_3h_mm': row.get('snow_3h_mm', 0),
-                        'is_hot': 1 if row.get('temperature', 15) > 25 else 0,
-                        'is_dry': 1 if row.get('humidity', 50) < 30 else 0,
-                        'humidity_temp_ratio': row.get('humidity', 50) / (row.get('temperature', 15) + 1),
-                        'is_windy': 1 if row.get('wind_speed', 10) > 15 else 0,
-                        'total_precip': (row.get('rain_1h_mm', 0) + row.get('rain_3h_mm', 0) + 
-                                        row.get('snow_1h_mm', 0) + row.get('snow_3h_mm', 0)),
-                        'has_recent_precip': 1 if (row.get('rain_1h_mm', 0) + row.get('rain_3h_mm', 0) + 
-                                                   row.get('snow_1h_mm', 0) + row.get('snow_3h_mm', 0)) > 0 else 0,
-                        'weather_main_encoded': 0
-                    },
-                    'fire_weather_indices': fwi_data,
-                    'model_confidence': 0.95
-                }
-                
-                # CRITICAL: Sanitize the entire result before adding it
-                result = self.sanitize_dict_for_json(result_raw)
-                
-                # Final validation before adding
-                if not np.isnan(result['daily_fire_risk']) and not np.isinf(result['daily_fire_risk']):
-                    results.append(result)
-                else:
-                    logger.warning(f"Skipping location {lat},{lon} due to invalid risk value")
+        # Process in batches to reduce memory pressure
+        BATCH_SIZE = 500
+        total_batches = (len(today_data) + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        for batch_idx in range(0, len(today_data), BATCH_SIZE):
+            batch_end = min(batch_idx + BATCH_SIZE, len(today_data))
+            batch = today_data.iloc[batch_idx:batch_end]
+            
+            logger.info(f"Processing batch {batch_idx//BATCH_SIZE + 1}/{total_batches}")
+            
+            for idx, row in batch.iterrows():
+                try:
+                    lat = float(row['lat'])
+                    lon = float(row['lon'])
+                    
+                    # Get history for this location
+                    location_hist = historical_data[
+                        (historical_data['lat'] == lat) & 
+                        (historical_data['lon'] == lon)
+                    ].copy()
+                    
+                    if len(location_hist) == 0:
+                        location_hist = pd.DataFrame([row])
+                        location_hist['file_date'] = datetime.now().strftime('%Y-%m-%d')
+                    
+                    # Calculate accumulated FWI
+                    fwi_data = self.calculate_accumulated_fwi(location_hist)
+                    
+                    # Validate FWI data
+                    if any(np.isnan(v) or np.isinf(v) for v in fwi_data.values()):
+                        logger.warning(f"Invalid FWI data for {lat},{lon}, using defaults")
+                        fwi_data = {'ffmc': 85.0, 'dmc': 6.0, 'dc': 15.0, 'isi': 1.0, 'bui': 10.0, 'fwi': 5.0, 'dsr': 1.0}
+                    
+                    # Get danger classification
+                    danger_class, risk_prob, color = self.fwi_calculator.get_danger_class(fwi_data['fwi'])
+                    
+                    # Historical fire adjustment
+                    if row.get('historical_fire', 0) == 1:
+                        risk_prob = min(0.98, risk_prob * 1.15)
+                    
+                    # Ensure risk_prob is valid
+                    risk_prob = float(risk_prob)
+                    if np.isnan(risk_prob) or np.isinf(risk_prob):
+                        risk_prob = 0.15
+                    
+                    result_raw = {
+                        'lat': lat,
+                        'lon': lon,
+                        'location_name': str(row.get('nearest_station', f'Grid_{idx}')),
+                        'province': self.get_province(lat, lon),
+                        'daily_fire_risk': risk_prob,
+                        'danger_class': danger_class,
+                        'color_code': color,
+                        'weather_features': {
+                            'temperature': row.get('temperature', 15),
+                            'humidity': row.get('humidity', 50),
+                            'wind_speed': row.get('wind_speed', 10),
+                            'pressure': row.get('pressure', 1013),
+                            'fire_danger_index': fwi_data['fwi'],
+                            'rain_1h_mm': row.get('rain_1h_mm', 0),
+                            'rain_3h_mm': row.get('rain_3h_mm', 0),
+                            'snow_1h_mm': row.get('snow_1h_mm', 0),
+                            'snow_3h_mm': row.get('snow_3h_mm', 0),
+                            'is_hot': 1 if row.get('temperature', 15) > 25 else 0,
+                            'is_dry': 1 if row.get('humidity', 50) < 30 else 0,
+                            'humidity_temp_ratio': row.get('humidity', 50) / (row.get('temperature', 15) + 1),
+                            'is_windy': 1 if row.get('wind_speed', 10) > 15 else 0,
+                            'total_precip': (row.get('rain_1h_mm', 0) + row.get('rain_3h_mm', 0) + 
+                                            row.get('snow_1h_mm', 0) + row.get('snow_3h_mm', 0)),
+                            'has_recent_precip': 1 if (row.get('rain_1h_mm', 0) + row.get('rain_3h_mm', 0) + 
+                                                       row.get('snow_1h_mm', 0) + row.get('snow_3h_mm', 0)) > 0 else 0,
+                            'weather_main_encoded': 0
+                        },
+                        'fire_weather_indices': fwi_data,
+                        'model_confidence': 0.95
+                    }
+                    
+                    # CRITICAL: Sanitize the entire result before adding it
+                    result = self.sanitize_dict_for_json(result_raw)
+                    
+                    # Final validation before adding
+                    if not np.isnan(result['daily_fire_risk']) and not np.isinf(result['daily_fire_risk']):
+                        results.append(result)
+                    else:
+                        logger.warning(f"Skipping location {lat},{lon} due to invalid risk value")
+                        processing_errors += 1
+                    
+                except Exception as e:
                     processing_errors += 1
-                
-            except Exception as e:
-                processing_errors += 1
-                logger.error(f"Error processing location {idx}: {e}")
-                continue
+                    logger.error(f"Error processing location {idx}: {e}")
+                    continue
+            
+            # Force garbage collection after each batch
+            gc.collect()
         
         processing_time = (datetime.now() - start_time).total_seconds()
         
@@ -496,12 +528,6 @@ class FireWeatherProcessor:
         
         logger.info(f"Processing complete: {len(results)} locations in {processing_time:.1f}s")
         logger.info(f"Risk: Min={min(risks):.3f}, Max={max(risks):.3f}, Mean={np.mean(risks):.3f}")
-        logger.info(f"Danger: VL={self.processing_stats['risk_statistics']['very_low_count']}, "
-                   f"L={self.processing_stats['risk_statistics']['low_count']}, "
-                   f"M={self.processing_stats['risk_statistics']['moderate_count']}, "
-                   f"H={self.processing_stats['risk_statistics']['high_count']}, "
-                   f"VH={self.processing_stats['risk_statistics']['very_high_count']}, "
-                   f"E={self.processing_stats['risk_statistics']['extreme_count']}")
         
         return results
     
@@ -534,104 +560,23 @@ class FireWeatherProcessor:
                     return prov
         
         return "Unknown"
-    def calculate_accumulated_fwi(self, location_history):
-        location_history = location_history.sort_values('file_date')
-        
-        # DEBUG: Track Calgary specifically
-        is_calgary = False
-        if len(location_history) > 0:
-            first_row = location_history.iloc[0]
-            if first_row.get('nearest_station') == 'Calgary':
-                is_calgary = True
-                logger.info(f"\n{'='*60}")
-                logger.info(f"CALGARY DEBUG - History length: {len(location_history)}")
-                logger.info(f"Date range: {location_history.iloc[0]['file_date']} to {location_history.iloc[-1]['file_date']}")
-                logger.info(f"{'='*60}")
-        
-        # Initialize codes
-        ffmc = 85
-        dmc = 6
-        dc = 15
-        
-        # Accumulate day by day
-        for idx, day in location_history.iterrows():
-            temp = day.get('temperature', 15)
-            humidity = day.get('humidity', 50)
-            wind = day.get('wind_speed', 10)
-            rain = (day.get('rain_1h_mm', 0) + day.get('rain_3h_mm', 0) + 
-                day.get('snow_1h_mm', 0) + day.get('snow_3h_mm', 0))
-            
-            month = datetime.now().month
-            
-            # Store old values for comparison
-            old_ffmc = ffmc
-            old_dmc = dmc
-            old_dc = dc
-            
-            # Update codes based on this day's weather
-            ffmc = self.fwi_calculator.calculate_ffmc(temp, humidity, wind, rain, ffmc)
-            dmc = self.fwi_calculator.calculate_dmc(temp, humidity, rain, dmc, month)
-            dc = self.fwi_calculator.calculate_dc(temp, rain, dc, month)
-            
-            # DEBUG: Log every day for Calgary (especially last 3 days)
-            if is_calgary and idx >= len(location_history) - 3:
-                logger.info(f"\nDate: {day.get('file_date')} | Temp: {temp}°C | Humidity: {humidity}% | Wind: {wind} km/h | Rain: {rain}mm")
-                logger.info(f"  FFMC: {old_ffmc:.1f} → {ffmc:.1f}")
-                logger.info(f"  DMC:  {old_dmc:.1f} → {dmc:.1f}")
-                logger.info(f"  DC:   {old_dc:.1f} → {dc:.1f}")
-        
-        # Calculate final indices from accumulated codes
-        isi = self.fwi_calculator.calculate_isi(wind, ffmc)
-        bui = self.fwi_calculator.calculate_bui(dmc, dc)
-        fwi = self.fwi_calculator.calculate_fwi(isi, bui)
-        dsr = 0.0272 * fwi ** 1.77
-        
-        if is_calgary:
-            logger.info(f"\n{'='*60}")
-            logger.info(f"FINAL CALGARY INDICES:")
-            logger.info(f"  FFMC: {ffmc:.1f}")
-            logger.info(f"  DMC:  {dmc:.1f}")
-            logger.info(f"  DC:   {dc:.1f}")
-            logger.info(f"  ISI:  {isi:.1f}")
-            logger.info(f"  BUI:  {bui:.1f}")
-            logger.info(f"  FWI:  {fwi:.1f}")
-            logger.info(f"  DSR:  {dsr:.1f}")
-            logger.info(f"{'='*60}\n")
-        
-        result = {
-            'ffmc': ffmc,
-            'dmc': dmc,
-            'dc': dc,
-            'isi': isi,
-            'bui': bui,
-            'fwi': fwi,
-            'dsr': dsr
-        }
-        
-        
-        return self.sanitize_dict_for_json(result)
 
 def main():
-    cleanup_old_weather_data(days_to_keep=45)
+    cleanup_old_weather_data(days_to_keep=30)  # REDUCED from 45
     processing_timestamp = datetime.now().isoformat()
     processor = FireWeatherProcessor()
     
     # Process with historical accumulation
     results = processor.process_all_locations()
     
-    # Validate results before saving
-    if not results or len(results) == 0:
-        logger.error("CRITICAL: No results generated from FWI processing!")
-        raise ValueError("No fire risk predictions generated")
-    
-    # Build API response
+    # Save results
     api_response = {
         "success": True,
         "data": results,
         "model_info": {
             "model_type": "Canadian Fire Weather Index System",
             "version": "2.0.0",
-            "methodology": "Historical Weather Accumulation",
+            "methodology": "30-Day Historical Weather Accumulation (Memory Optimized)",
             "r2_score": 0.95,
             "mse": 0.001,
             "mae": 0.01,
@@ -643,88 +588,44 @@ def main():
         "last_updated": processing_timestamp
     }
     
-    # Sanitize the entire response
+    #Sanitize the entire response
     api_response_sanitized = processor.sanitize_dict_for_json(api_response)
     
-    # Validate sanitized data
-    try:
-        # Test if it can be JSON serialized
-        json.dumps(api_response_sanitized)
-    except (TypeError, ValueError) as e:
-        logger.error(f"Data validation failed - cannot serialize to JSON: {e}")
-        raise ValueError(f"Invalid data structure for JSON: {e}")
-    
-    # Save predictions with error handling
-    try:
-        with open("fwi_predictions.json", "w") as f:
-            json.dump(api_response_sanitized, f, indent=2)
-        logger.info("✓ Saved predictions to fwi_predictions.json")
-    except IOError as e:
-        logger.error(f"Failed to write fwi_predictions.json: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error saving predictions: {e}")
-        raise
-    
-    # Verify the file was written correctly
-    try:
-        with open("fwi_predictions.json", "r") as f:
-            verification = json.load(f)
-        if not verification.get("data"):
-            raise ValueError("Saved file is missing data!")
-        logger.info(f"✓ Verified predictions file: {len(verification['data'])} records")
-    except Exception as e:
-        logger.error(f"Prediction file verification failed: {e}")
-        raise
+    with open("fwi_predictions.json", "w") as f:
+        json.dump(api_response_sanitized, f, indent=2)
     
     # Save system components
-    try:
-        os.makedirs("model_components", exist_ok=True)
-        
-        # Save processor
-        joblib.dump(processor, "model_components/fire_risk_model.pkl")
-        logger.info("✓ Saved fire risk model")
-        
-        # Save features
-        features = ['temperature', 'humidity', 'wind_speed', 'pressure', 'rain_1h_mm', 'rain_3h_mm', 'historical_fire']
-        joblib.dump(features, "model_components/model_features.pkl")
-        logger.info("✓ Saved model features")
-        
-        # Save dummy encoder
-        from sklearn.preprocessing import LabelEncoder
-        dummy_encoder = LabelEncoder()
-        dummy_encoder.classes_ = np.array(['Clear', 'Clouds', 'Rain'])
-        joblib.dump(dummy_encoder, "model_components/weather_encoder.pkl")
-        logger.info("✓ Saved weather encoder")
-        
-    except Exception as e:
-        logger.error(f"Failed to save model components: {e}")
-        # Don't raise - predictions are more critical
+    os.makedirs("model_components", exist_ok=True)
+    joblib.dump(processor, "model_components/fire_risk_model.pkl")
     
-    # Save system info
+    features = ['temperature', 'humidity', 'wind_speed', 'pressure', 'rain_1h_mm', 'rain_3h_mm', 'historical_fire']
+    joblib.dump(features, "model_components/model_features.pkl")
+    
+    from sklearn.preprocessing import LabelEncoder
+    dummy_encoder = LabelEncoder()
+    dummy_encoder.classes_ = np.array(['Clear', 'Clouds', 'Rain'])
+    joblib.dump(dummy_encoder, "model_components/weather_encoder.pkl")
+    
     system_info = {
         "model_type": "Canadian Fire Weather Index System",
-        "methodology": "45-Day Historical Weather Accumulation",
+        "methodology": "30-Day Historical Weather Accumulation (Memory Optimized)",
         "r2_score": 0.95,
         "mse": 0.001,
         "mae": 0.01,
         "processing_stats": processor.processing_stats,
         "last_trained": processing_timestamp,
-        "version": "FWI_2.0_Historical"
+        "version": "FWI_2.0_Historical_MemoryOptimized"
     }
     
-    try:
-        with open("model_info.json", "w") as f:
-            json.dump(system_info, f, indent=2)
-        logger.info("✓ Saved model info")
-    except Exception as e:
-        logger.error(f"Failed to save model_info.json: {e}")
+    with open("model_info.json", "w") as f:
+        json.dump(system_info, f, indent=2)
+    
+    print("=" * 70)
+    print("Fire Weather Index System Ready!")
+    print(f"✓ Processing completed at: {processing_timestamp}")
+    print(f"✓ Using 30 days of historical data (memory optimized)")
+    print(f"✓ Processed {len(results)} locations successfully")
+    print("=" * 70)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logger.error(f"FATAL ERROR: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise
+    main()

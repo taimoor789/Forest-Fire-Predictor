@@ -176,7 +176,7 @@ async def root():
         "documentation": "/docs"
     }
 
-@app.get("/health", response_model=DetailedHealthResponse)
+@app.get("/health")
 async def health_check():
     """
     Comprehensive health check endpoint.
@@ -365,8 +365,10 @@ async def health_check():
             data_freshness_status.last_updated = system_info_data.get("last_trained", "unknown")
             
     uptime = (datetime.now() - STARTUP_TIME).total_seconds()
+
+    from fastapi.responses import JSONResponse
     
-    return DetailedHealthResponse(
+    response_data = DetailedHealthResponse(
         status=overall_status,
         timestamp=datetime.now().isoformat(),
         system_type="Canadian Fire Weather Index System",
@@ -375,6 +377,15 @@ async def health_check():
         data_freshness=data_freshness_status,
         uptime_seconds=round(uptime, 2)
     )
+    
+    return JSONResponse(
+        content=response_data.dict(),
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    ) 
 
 @app.get("/api/model/info", response_model=ModelInfoResponse)
 async def get_model_info():
@@ -430,7 +441,18 @@ async def get_fire_risk_predictions():
                 raise ValueError("No prediction data available")
             
             logger.info(f"Returning {len(cached_predictions['data'])} Fire Weather Index predictions")
-            return cached_predictions
+            
+            # Create response with no-cache headers
+            from fastapi.responses import JSONResponse
+            
+            return JSONResponse(
+                content=cached_predictions,
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                    "Pragma": "no-cache",
+                    "Expires": "0"
+                }
+            )
             
         except FileNotFoundError:
             logger.error("No predictions available - fwi_predictions.json not found")
