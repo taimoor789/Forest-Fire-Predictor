@@ -125,7 +125,9 @@ ALLOWED_ORIGINS = [
     'http://localhost:3000',
     'http://localhost:3001',
     'https://fire-risk-predictor.vercel.app',
-    'https://d1aexr3nj3xzld.cloudfront.net',  
+    'https://forestfirepredictor.com',           
+    'https://www.forestfirepredictor.com',      
+    'https://d1aexr3nj3xzld.cloudfront.net',
 ]
 
 VERCEL_DOMAIN = os.environ.get('VERCEL_DOMAIN')
