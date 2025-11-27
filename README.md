@@ -1,4 +1,4 @@
-# 🔥 Forest Fire Risk Predictor - Backend
+# Forest Fire Risk Predictor - Backend
 
 > **Production-grade fire risk assessment API powered by Canada's official Fire Weather Index System**
 
@@ -6,7 +6,7 @@ A Python-based backend that processes real-time weather data and calculates fire
 
 ---
 
-## 📊 Overview
+## Overview
 
 The backend implements Environment Canada's **Canadian Fire Weather Index (FWI) System** - the official algorithm used by Canadian wildfire agencies for fire danger rating.
 
@@ -20,7 +20,7 @@ The backend implements Environment Canada's **Canadian Fire Weather Index (FWI) 
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
@@ -34,7 +34,7 @@ The backend implements Environment Canada's **Canadian Fire Weather Index (FWI) 
 
 ---
 
-## 🔥 Fire Weather Index System
+## Fire Weather Index System
 
 ### **What is FWI?**
 
@@ -66,7 +66,7 @@ The **Canadian Fire Weather Index (FWI) System** is the official method used by 
 
 ---
 
-## 📊 Data Sources
+## Data Sources
 
 ### **Weather Data**
 - **Provider:** OpenWeather API
@@ -86,7 +86,7 @@ The **Canadian Fire Weather Index (FWI) System** is the official method used by 
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **Environment and Climate Change Canada** - FWI System development
 - **Canadian Forest Service** - Fire weather research
@@ -97,7 +97,7 @@ The **Canadian Fire Weather Index (FWI) System** is the official method used by 
 
 <div align="center">
 
-**🔥 Protecting Canadian communities through data-driven fire risk assessment 🇨🇦**
+**Protecting Canadian communities through data-driven fire risk assessment 🇨🇦**
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue?style=for-the-badge&logo=python)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green?style=for-the-badge&logo=fastapi)
