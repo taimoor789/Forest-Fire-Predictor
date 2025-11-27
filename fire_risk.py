@@ -484,7 +484,6 @@ class FireWeatherProcessor:
                         'model_confidence': 0.95
                     }
                     
-                    # CRITICAL: Sanitize the entire result before adding it
                     result = self.sanitize_dict_for_json(result_raw)
                     
                     # Final validation before adding
@@ -562,7 +561,7 @@ class FireWeatherProcessor:
         return "Unknown"
 
 def main():
-    cleanup_old_weather_data(days_to_keep=30)  # REDUCED from 45
+    cleanup_old_weather_data(days_to_keep=30) #reduced from 45
     processing_timestamp = datetime.now().isoformat()
     processor = FireWeatherProcessor()
     
