@@ -13,7 +13,7 @@ import gc  # Garbage collection
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def cleanup_old_weather_data(days_to_keep=30):  # REDUCED from 45
+def cleanup_old_weather_data(days_to_keep=45):  
     """Delete weather data files older than specified days"""
     weather_files = sorted(glob.glob("weather_data/*.csv"))
     
@@ -251,7 +251,7 @@ class CanadianFireWeatherIndex:
 
 class FireWeatherProcessor:
     """
-    Process FWI using historical weather accumulation - MEMORY OPTIMIZED
+    Process FWI using historical weather accumulation
     """
     
     def __init__(self):
@@ -282,8 +282,8 @@ class FireWeatherProcessor:
             return int(data)
         return data
         
-    def load_historical_weather(self, days_back=30):  # REDUCED from 45
-        """Load historical weather data for FWI accumulation - MEMORY OPTIMIZED"""
+    def load_historical_weather(self, days_back=45):  
+        """Load historical weather data for FWI accumulation"""
         weather_files = sorted(glob.glob("weather_data/*.csv"))
         
         if not weather_files:
@@ -372,13 +372,12 @@ class FireWeatherProcessor:
         return self.sanitize_dict_for_json(result)
     
     def process_all_locations(self, weather_file=None):
-        """Process FWI for all locations using historical accumulation - MEMORY OPTIMIZED"""
         
         logger.info("Processing Fire Weather Index with historical accumulation...")
         start_time = datetime.now()
         
         # Load historical data
-        historical_data = self.load_historical_weather(days_back=30)  # REDUCED from 45
+        historical_data = self.load_historical_weather(days_back=45)  
         
         # Get today's data
         if weather_file is None:
@@ -561,7 +560,7 @@ class FireWeatherProcessor:
         return "Unknown"
 
 def main():
-    cleanup_old_weather_data(days_to_keep=30) #reduced from 45
+    cleanup_old_weather_data(days_to_keep=45)  
     processing_timestamp = datetime.now().isoformat()
     processor = FireWeatherProcessor()
     
@@ -575,7 +574,7 @@ def main():
         "model_info": {
             "model_type": "Canadian Fire Weather Index System",
             "version": "2.0.0",
-            "methodology": "30-Day Historical Weather Accumulation (Memory Optimized)",
+            "methodology": "45-Day Historical Weather Accumulation", 
             "r2_score": 0.95,
             "mse": 0.001,
             "mae": 0.01,
@@ -607,13 +606,13 @@ def main():
     
     system_info = {
         "model_type": "Canadian Fire Weather Index System",
-        "methodology": "30-Day Historical Weather Accumulation (Memory Optimized)",
+        "methodology": "45-Day Historical Weather Accumulation",  # RESTORED
         "r2_score": 0.95,
         "mse": 0.001,
         "mae": 0.01,
         "processing_stats": processor.processing_stats,
         "last_trained": processing_timestamp,
-        "version": "FWI_2.0_Historical_MemoryOptimized"
+        "version": "FWI_2.0_Historical"  # RESTORED
     }
     
     with open("model_info.json", "w") as f:
@@ -622,7 +621,7 @@ def main():
     print("=" * 70)
     print("Fire Weather Index System Ready!")
     print(f"✓ Processing completed at: {processing_timestamp}")
-    print(f"✓ Using 30 days of historical data (memory optimized)")
+    print(f"✓ Using 45 days of historical data") 
     print(f"✓ Processed {len(results)} locations successfully")
     print("=" * 70)
 
