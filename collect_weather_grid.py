@@ -1,6 +1,5 @@
 import pandas as pd
 import requests
-import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
@@ -10,9 +9,9 @@ from logging_config import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
 
-MAX_RETRIES = 3
-RETRY_DELAY = 5
-REQUEST_TIMEOUT = 10
+MAX_RETRIES = 3 #Number of times to retry failed requests
+RETRY_DELAY = 5  #Seconds to wait between retries
+REQUEST_TIMEOUT = 10 #Seconds before request times out
 
 # Load API key with validation
 API_KEY = os.environ.get("OPENWEATHER_API_KEY")
@@ -80,12 +79,15 @@ def get_weather(lat, lon, retry=0):
     url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={API_KEY}&units=metric"
     
     try:
+        #Make HTTP GET request with timeout
         response = requests.get(url, timeout=REQUEST_TIMEOUT)
         
-        if response.status_code == 200:
-            data = response.json()
+        #Success, parse and return weather data
+        if response.status_code == 200: 
+            data = response.json() #convert json data to dict
             
-            # Extract data with safe defaults
+            #Extract data with safe defaults
+            #If key doesn't exist, returns {} instead of throwing KeyError
             main = data.get("main", {}) or {}
             wind = data.get("wind", {}) or {}
             clouds = data.get("clouds", {}) or {}
@@ -95,6 +97,7 @@ def get_weather(lat, lon, retry=0):
             weather_main = weather_list[0].get("main") if weather_list else "Unknown"
             weather_desc = weather_list[0].get("description") if weather_list else "No description"
 
+            #Return structured weather data dictionary
             return {
                 "temperature": main.get("temp", 15.0),
                 "feels_like": main.get("feels_like", 15.0),
@@ -118,14 +121,14 @@ def get_weather(lat, lon, retry=0):
             
         elif response.status_code == 429:  # Rate limited
             if retry < MAX_RETRIES:
-                wait_time = RETRY_DELAY * (retry + 1)  # Exponential backoff
+                wait_time = RETRY_DELAY * (retry + 1)  
                 logger.warning(f"Rate limited for {lat},{lon}. Retrying in {wait_time}s... (attempt {retry + 1}/{MAX_RETRIES})")
                 time.sleep(wait_time)
-                return get_weather(lat, lon, retry + 1)
+                return get_weather(lat, lon, retry + 1) # Recursive retry
             else:
                 logger.error(f"Rate limit exceeded after {MAX_RETRIES} retries for {lat},{lon}")
                 return None
-                
+     
         elif response.status_code == 401:
             logger.error("Invalid API key! Check OPENWEATHER_API_KEY")
             return None
@@ -141,7 +144,8 @@ def get_weather(lat, lon, retry=0):
         else:
             logger.error(f"Unexpected status code {response.status_code} for {lat},{lon}")
             return None
-            
+    
+    #Retry on network timeouts
     except requests.Timeout:
         if retry < MAX_RETRIES:
             logger.warning(f"Timeout for {lat},{lon}. Retrying... (attempt {retry + 1}/{MAX_RETRIES})")
@@ -150,27 +154,30 @@ def get_weather(lat, lon, retry=0):
         else:
             logger.error(f"Timeout after {MAX_RETRIES} retries for {lat},{lon}")
             return None
-            
+
+    #Network errors: Connection issues, DNS failures  
     except requests.RequestException as e:
         logger.error(f"Request error for {lat},{lon}: {e}")
         if retry < MAX_RETRIES:
             time.sleep(RETRY_DELAY)
             return get_weather(lat, lon, retry + 1)
         return None
-        
+    
+    #Catch all for any other issues
     except Exception as e:
         logger.error(f"Unexpected error getting weather for {lat},{lon}: {e}")
         return None
 
-# Get unique stations
+#Get unique stations (avoid duplicate API calls)
 unique_stations = mapping_df["nearest_station_name"].unique()
 logger.info(f"Fetching weather for {len(unique_stations)} unique stations")
 
-# Fetch weather for each station
+#Initialize tracking dictionaries
 station_weather = {}
 successful_fetches = 0
 failed_fetches = 0
 
+#Loop through each station and fetch weather
 for i, station in enumerate(unique_stations, 1):
     if station in station_coords:
         lat, lon = station_coords[station]
@@ -185,7 +192,7 @@ for i, station in enumerate(unique_stations, 1):
             logger.warning(f"Failed to get weather for {station}")
             failed_fetches += 1
             
-        # Rate limiting: small delay between requests
+         #Small delay to avoid hammering the API
         time.sleep(0.1)
     else:
         logger.warning(f"No coordinates found for station: {station}")
@@ -197,14 +204,18 @@ if successful_fetches == 0:
     logger.error("CRITICAL: No weather data retrieved! Exiting.")
     raise RuntimeError("Failed to retrieve any weather data")
 
-# Get Calgary time
+#Get Calgary time
 calgary_tz = ZoneInfo("America/Edmonton")
 calgary_time = datetime.now(calgary_tz).strftime("%Y-%m-%d %H:%M:%S")
 
-# Create output rows
+#Map weather to grid cells
 grid_weather = []
+
+#Iterate through each grid cell from mapping file
 for _, row in mapping_df.iterrows():
     station = row["nearest_station_name"]
+
+    #If we have weather data for this station, use it
     if station in station_weather:
         w = station_weather[station]
         
@@ -233,7 +244,7 @@ for _, row in mapping_df.iterrows():
             "timestamp_utc": w.get("timestamp_utc")
         })
     else:
-        # Station failed - use None values
+        #Station failed - use None values
         grid_weather.append({
             "lat": row["lat"],
             "lon": row["lon"],
@@ -259,13 +270,14 @@ for _, row in mapping_df.iterrows():
             "timestamp_utc": None
         })
 
-# Ensure output directory exists
+#Ensure output directory exists
 os.makedirs("weather_data", exist_ok=True)
 
-# Save to CSV
+#Create filename with today's date
 today_str = datetime.now().strftime("%Y-%m-%d")
 output_path = f"weather_data/{today_str}.csv"
 
+#Write to CSV
 try:
     df_output = pd.DataFrame(grid_weather)
     df_output.to_csv(output_path, index=False)
