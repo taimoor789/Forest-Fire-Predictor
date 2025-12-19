@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
@@ -9,7 +9,6 @@ import glob
 import json
 import subprocess
 import sys
-from pathlib import Path
 from contextlib import asynccontextmanager
 
 STARTUP_TIME = datetime.now()
@@ -22,6 +21,7 @@ logger = get_logger(__name__)
 
 # Pydantic models for request/response validation
 class HealthResponse(BaseModel):
+    """Health check endpoint response"""
     status: str
     timestamp: str
     system_type: str
@@ -30,6 +30,7 @@ class HealthResponse(BaseModel):
     last_updated: Optional[str] = None
 
 class ModelInfoResponse(BaseModel):
+    """Model metadata endpoint response"""
     model_type: str
     methodology: str
     r2_score: float
@@ -43,11 +44,13 @@ class ModelInfoResponse(BaseModel):
     confidence: str
 
 class SystemReloadResponse(BaseModel):
+    """System reload operation response"""
     success: bool
     message: str
     timestamp: str
 
 class ErrorResponse(BaseModel):
+    """Standardized error response"""
     detail: str
     error_code: Optional[str] = None
     timestamp: str
@@ -59,11 +62,13 @@ class DataFreshnessStatus(BaseModel):
     status: str  # "fresh", "stale", "missing"
 
 class ComponentHealth(BaseModel):
+    """Individual component health status"""
     name: str
     status: str  # "healthy", "degraded", "unhealthy"
     message: str
 
 class DetailedHealthResponse(BaseModel):
+    """Comprehensive health check response"""
     status: str  # "healthy", "degraded", "unhealthy"
     timestamp: str
     system_type: str
@@ -74,30 +79,36 @@ class DetailedHealthResponse(BaseModel):
 
 # Request validation models
 class RetrainRequest(BaseModel):
+    """Request body for system retrain endpoint"""
     force: bool = Field(default=False, description="Force retrain even if recent data exists")
     
     @validator('force')
     def validate_force(cls, v):
+        #Ensure force is a boolean
         if not isinstance(v, bool):
             raise ValueError('force must be a boolean')
         return v
 
 # Global variables for system components
-fire_weather_processor = None
-system_info_data = None
+fire_weather_processor = None # Will hold loaded FWI processor
+system_info_data = None # Will hold model metadata
 
 # Load system on startup
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    """
+    Async context manager for application lifecycle.
+    Runs startup code before accepting requests, shutdown code on exit.
+    """
     global fire_weather_processor, system_info_data
     logger.info("=" * 70)
     logger.info("Loading Fire Weather Index System...")
     
     try: 
-        fire_weather_processor = True  # Flag that system is ready
+        # Set flag indicating system is ready (actual processor not loaded for memory efficiency)
+        fire_weather_processor = True 
         
-        # Load system info from JSON file
+        # Load system metadata from JSON file
         try: 
             with open("model_info.json", "r") as f:
                 system_info_data = json.load(f)
@@ -115,10 +126,8 @@ async def lifespan(app: FastAPI):
         fire_weather_processor = None
     
     logger.info("=" * 70)
+    # Yield: Application runs and serves requests here
     yield
-    
-    # Shutdown
-    logger.info("Shutting down Fire Weather Index System")
 
 #CORS Settings - Allow both local and production
 ALLOWED_ORIGINS = [
@@ -130,6 +139,7 @@ ALLOWED_ORIGINS = [
     'https://d1aexr3nj3xzld.cloudfront.net',
 ]
 
+# Dynamically add Vercel preview URLs from environment variables
 VERCEL_DOMAIN = os.environ.get('VERCEL_DOMAIN')
 CUSTOM_DOMAIN = os.environ.get('CUSTOM_DOMAIN')
 
@@ -145,9 +155,10 @@ app = FastAPI(
     title="Forest Fire Risk Prediction API", 
     description="Production fire risk assessment using Canadian Fire Weather Index System",
     version="2.0.0",
-    lifespan=lifespan
+    lifespan=lifespan # Lifespan context manager for startup/shutdown
 )
 
+# Add CORS middleware (must be added before routes)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -157,8 +168,6 @@ app.add_middleware(
     max_age=3600
 )
 
-print(f"CORS Allowed Origins: {ALLOWED_ORIGINS}")  # Debug log
-
 # Helper function for error responses
 def create_error_response(detail: str, error_code: Optional[str] = None) -> dict:
     return {
@@ -167,9 +176,10 @@ def create_error_response(detail: str, error_code: Optional[str] = None) -> dict
         "timestamp": datetime.now().isoformat()
     }
 
+#API endpoints
 @app.get("/")
 async def root():
-    """Root endpoint"""
+    """Root endpoint - basic API information"""
     return {
         "message": "Forest Fire Risk Prediction API", 
         "version": "2.0.0", 
@@ -187,7 +197,7 @@ async def health_check():
     components = []
     overall_status = "healthy"
     
-    # 1. Check if system is loaded
+    # 1. Check if FWI processor is loaded
     if fire_weather_processor:
         components.append(ComponentHealth(
             name="Fire Weather Processor",
@@ -202,11 +212,12 @@ async def health_check():
         ))
         overall_status = "unhealthy"
     
-    # 2. Check weather data availability
+    # 2. Check weather data availability/freshness
     try:
         weather_files = glob.glob("weather_data/*.csv")
         if len(weather_files) > 0:
             latest_file = max(weather_files, key=os.path.getmtime)
+            # Calculate age in hours
             file_age = (datetime.now().timestamp() - os.path.getmtime(latest_file)) / 3600
             
             if file_age < 2:  # Less than 2 hours old
@@ -251,6 +262,7 @@ async def health_check():
             file_size = os.path.getsize("fwi_predictions.json")
             file_age = (datetime.now().timestamp() - os.path.getmtime("fwi_predictions.json")) / 3600
             
+            # Validate file size (too small indicates problem)
             if file_size < 1024:  # Less than 1KB is suspicious
                 components.append(ComponentHealth(
                     name="Predictions Cache",
@@ -319,7 +331,7 @@ async def health_check():
         ))
         overall_status = "unhealthy"
     
-    # 4. Check model components
+    # 4. Check model component files
     required_files = [
         "model_components/fire_risk_model.pkl",
         "model_info.json"
@@ -354,7 +366,9 @@ async def health_check():
     
     if system_info_data and "last_trained" in system_info_data:
         try:
+            # Parse ISO timestamp
             last_updated_dt = datetime.fromisoformat(system_info_data["last_trained"].replace('Z', '+00:00'))
+            # Calculate age
             age_hours = (datetime.now(last_updated_dt.tzinfo or None) - last_updated_dt).total_seconds() / 3600
             
             data_freshness_status = DataFreshnessStatus(
@@ -364,10 +378,13 @@ async def health_check():
                 status="fresh" if age_hours < 2 else ("stale" if age_hours < 24 else "very_stale")
             )
         except Exception:
+            # Fallback if timestamp parsing fails
             data_freshness_status.last_updated = system_info_data.get("last_trained", "unknown")
             
+    # Calculate server uptime
     uptime = (datetime.now() - STARTUP_TIME).total_seconds()
 
+    #6. Build and return response with no-cache headers
     from fastapi.responses import JSONResponse
     
     response_data = DetailedHealthResponse(
@@ -380,6 +397,7 @@ async def health_check():
         uptime_seconds=round(uptime, 2)
     )
     
+    # Return with cache-prevention headers
     return JSONResponse(
         content=response_data.dict(),
         headers={
@@ -399,6 +417,7 @@ async def get_model_info():
         )
     
     try:
+        # Extract training records from processing stats
         training_records = 0
         if system_info_data and "processing_stats" in system_info_data:
             training_records = system_info_data["processing_stats"].get("processed_successfully", 0)
@@ -422,7 +441,9 @@ async def get_model_info():
 
 @app.get("/api/predict/fire-risk")
 async def get_fire_risk_predictions():
-    """Get fire risk predictions with validation"""
+    """
+    Get fire risk predictions with validation. Loads cached predictions from JSON file and returns to frontend.
+    """
     if not fire_weather_processor:
         raise HTTPException(
             status_code=503,
@@ -444,7 +465,7 @@ async def get_fire_risk_predictions():
             
             logger.info(f"Returning {len(cached_predictions['data'])} Fire Weather Index predictions")
             
-            # Create response with no-cache headers
+            # Return response with cache-prevention headers
             from fastapi.responses import JSONResponse
             
             return JSONResponse(
@@ -482,14 +503,14 @@ async def get_fire_risk_predictions():
 async def retrain_system(request: Optional[RetrainRequest] = None):
     """Trigger the data pipeline to refresh weather data and recalculate fire weather indices"""
     
-    # Validate request
+    # Validate request (use defaults if None)
     if request is None:
         request = RetrainRequest()
     
     try:
         logger.info("Triggering fire weather system refresh...")
         
-        # Check if recent data exists
+        # Check if recent data exists (unless force=true)
         if not request.force:
             prediction_file = "fwi_predictions.json"
             if os.path.exists(prediction_file):
@@ -502,15 +523,16 @@ async def retrain_system(request: Optional[RetrainRequest] = None):
                         timestamp=datetime.now().isoformat()
                     )
         
+        # Run data pipeline as subprocess
         result = subprocess.run(
             [sys.executable, "daily_update.py", "--pipeline-only"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=300
+            capture_output=True, # Capture stdout/stderr
+            text=True, # Return as strings
+            check=True, # Raise exception on non-zero exit
+            timeout=300 # 5 minute timeout
         )
 
-        # Reload system components
+        # Reload system components after successful pipeline run
         global fire_weather_processor, system_info_data
         
         try:
@@ -540,12 +562,14 @@ async def retrain_system(request: Optional[RetrainRequest] = None):
 
 @app.post("/api/system/reload", response_model=SystemReloadResponse)
 async def reload_system():
-    """Reload the Fire Weather System components without refreshing weather data"""
+    """Reload the Fire Weather System components without refreshing weather data. Useful when predictions file is updated externally (by cron job)."""
     try: 
         global fire_weather_processor, system_info_data
         
+        # Reload model components from disk
         fire_weather_processor = joblib.load("model_components/fire_risk_model.pkl")
         
+        # Reload metadata
         with open("model_info.json", "r") as f:
             system_info_data = json.load(f)
             
@@ -597,7 +621,7 @@ async def get_system_stats():
 
 @app.get("/api/danger-classes")
 async def get_danger_classes():
-    """Get fire danger class definitions and color codes"""
+    """Get fire danger class definitions and color codes. Returns official FWI danger classifications for frontend display."""
     return {
         "danger_classes": [
             {"name": "Very Low", "range": "0-1 FWI", "color": "#4CAF50", "description": "Fires start easily but spread slowly"},
