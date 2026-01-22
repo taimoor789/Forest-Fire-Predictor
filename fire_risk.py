@@ -49,7 +49,7 @@ class CanadianFireWeatherIndex:
         """
         Get realistic starting FWI codes based on seasonal weather patterns.
         
-        These values represent typical fuel moisture conditions at the START 
+        These values represent typical fuel moisture conditions at the start 
         of each season after the preceding months' weather patterns.
         """
         
@@ -109,7 +109,6 @@ class CanadianFireWeatherIndex:
         
         Represents moisture content of litter and fine fuels (1-2 hour timelag).
         This is the top layer of the forest floor that dries/wets quickly.
-        
         """
         # Sanitize inputs
         temp = self.sanitize_value(temp, 15, -50, 50)
@@ -289,7 +288,7 @@ class CanadianFireWeatherIndex:
         
         Combines DMC and DC to represent total fuel available for combustion.
         Indicates the amount of fuel available for fire.
-        
+
         """
         dmc = self.sanitize_value(dmc, 6, 0, 500)
         dc = self.sanitize_value(dc, 15, 0, 1000)
@@ -338,15 +337,9 @@ class CanadianFireWeatherIndex:
         """
         Official Canadian Fire Danger Classification
         
-        These danger classes represent fire behavior potential, not ignition probability.
-        
-        Danger Class Meanings:
-        Very Low (0-2):   Fuels will not ignite readily
-        Low (2-4):        Fires start easily but spread slowly
-        Moderate (4-8):   Fires start easily, spread at moderate rate
-        High (8-18):      High fire intensity, serious control problems
-        Very High (18-30): Very intense fires with rapid spread
-        Extreme (30+):     Extremely intense, fast-moving fires
+        These danger classes are defined by Environment and Climate Change Canada.
+        They represent fire behavior potential, not ignition probability.
+
         """
         fwi = self.sanitize_value(fwi, 5, 0, 100)
         
@@ -605,7 +598,7 @@ class FireWeatherProcessor:
                         'lon': lon,
                         'location_name': str(row.get('nearest_station', f'Grid_{idx}')),
                         'province': self.get_province(lat, lon),
-                        'fwi': adjusted_fwi,  # Fire Weather Index value 
+                        'fwi': adjusted_fwi,  # Fire Weather Index value (not percentage!)
                         'danger_class': danger_class,
                         'color_code': color,
                         'weather_features': {
@@ -742,11 +735,15 @@ def main():
         "processing_stats": processor.processing_stats,
         "timestamp": processing_timestamp,
         "last_updated": processing_timestamp,
+        "fwi_calculated_at": processing_timestamp,  # When FWI was calculated
+        "weather_last_updated": processing_timestamp,  # Same on initial calculation
+        "last_update_type": "full_fwi_calculation", 
         "notes": {
             "fwi_interpretation": "FWI represents fire behavior potential (spread rate, intensity) if ignition occurs",
             "not_a_probability": "FWI does NOT predict the probability of a fire starting",
             "danger_classes": "Official Canadian Forest Service danger classifications",
-            "historical_fire_adjustment": "Locations with past fires receive 15% FWI increase"
+            "historical_fire_adjustment": "Locations with past fires receive 15% FWI increase",
+            "update_schedule": "FWI: Daily at noon | Weather: Hourly"
         }
     }
     
