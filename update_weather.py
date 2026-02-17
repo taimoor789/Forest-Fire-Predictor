@@ -94,7 +94,9 @@ def update_weather_conditions():
         # Update metadata timestamps
         weather_update_time = datetime.now().isoformat()
         fwi_data['weather_last_updated'] = weather_update_time
-        
+        fwi_data['last_updated'] = weather_update_time  
+        fwi_data['timestamp'] = weather_update_time      
+
         # Add update type to distinguish from full FWI recalculation
         fwi_data['last_update_type'] = 'weather_only'
         
