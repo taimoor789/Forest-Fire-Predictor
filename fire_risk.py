@@ -456,7 +456,6 @@ class FireWeatherProcessor:
             dmc = initial_codes['dmc']
             dc = initial_codes['dc']
             season_name = initial_codes['season_name']
-            logger.info(f"Starting codes for {season_name}: FFMC={ffmc}, DMC={dmc}, DC={dc}")
         else:
             # Partial history: use seasonal defaults
             logger.debug(f"Using seasonal initial codes (only {len(location_history)} days of history)")
@@ -465,7 +464,6 @@ class FireWeatherProcessor:
             dmc = initial_codes['dmc']
             dc = initial_codes['dc']
             season_name = initial_codes['season_name']
-            logger.info(f"Starting codes for {season_name}: FFMC={ffmc}, DMC={dmc}, DC={dc}")
         
         # Accumulate day by day using official FWI formulas
         for _, day in location_history.iterrows():
