@@ -97,10 +97,4 @@ The **Canadian Fire Weather Index (FWI) System** is the official method used by 
 
 <div align="center">
 
-**Protecting Canadian communities through data-driven fire risk assessment 🇨🇦**
-
-![Python](https://img.shields.io/badge/Python-3.11+-blue?style=for-the-badge&logo=python)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green?style=for-the-badge&logo=fastapi)
-![AWS](https://img.shields.io/badge/AWS-Deployed-orange?style=for-the-badge&logo=amazon-aws)
-
 </div>
