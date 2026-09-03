@@ -25,3 +25,7 @@ logs/
 /model_info.json
 /forest-fire-api.zip
 /deployment.zip
+/failed_locations.csv
+/nfdb_fires_2023.csv
+/needed_tiles.csv
+/nasa_power_weather_2023.csv
