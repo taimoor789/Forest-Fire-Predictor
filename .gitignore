@@ -25,3 +25,4 @@ logs/
 /model_info.json
 /forest-fire-api.zip
 /deployment.zip
+/.DS_Store
