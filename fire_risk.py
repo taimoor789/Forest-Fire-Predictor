@@ -473,7 +473,7 @@ class FireWeatherProcessor:
             rain = (day.get('rain_1h_mm', 0) + day.get('rain_3h_mm', 0) + 
                    day.get('snow_1h_mm', 0) + day.get('snow_3h_mm', 0))
             
-            month = datetime.now().month
+            month = pd.to_datetime(day['file_date']).month
             
             # Update codes based on this day's weather (pure FWI algorithm)
             ffmc = self.fwi_calculator.calculate_ffmc(temp, humidity, wind, rain, ffmc)
