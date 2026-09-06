@@ -13,6 +13,15 @@ import gc  # Garbage collection
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+DANGER_CLASS_COLORS = {
+    "Very Low": "#4CAF50",
+    "Low": "#8BC34A",
+    "Moderate": "#FFEB3B",
+    "High": "#FF9800",
+    "Very High": "#F44336",
+    "Extreme": "#9C27B0",
+}
+
 def cleanup_old_weather_data(days_to_keep=45):  
     """Delete weather data files older than specified days"""
     weather_files = sorted(glob.glob("weather_data/*.csv"))
@@ -358,14 +367,16 @@ class CanadianFireWeatherIndex:
             return "Extreme", fwi, "#9C27B0"
 
 class FireWeatherProcessor:
-    """
-    Process FWI using historical weather accumulation
-    Pure Canadian FWI System - no modifications
-    """
     
     def __init__(self):
         self.fwi_calculator = CanadianFireWeatherIndex()
         self.processing_stats = {}
+
+        self.ml_model = joblib.load("model_components/fire_risk_ml_model.pkl")
+        with open("model_components/fire_risk_ml_features.json") as f:
+            self.ml_feature_schema = json.load(f)
+        with open("model_components/ml_tier_thresholds.json") as f:
+            self.ml_tier_thresholds = json.load(f)
     
     def sanitize_for_json(self, value):
         """Convert any invalid float to a valid JSON-compliant number"""
@@ -390,6 +401,33 @@ class FireWeatherProcessor:
         elif isinstance(data, (np.integer, int)):
             return int(data)
         return data
+
+    def get_ml_danger_class(self, lat, lon, ffmc, dmc, dc, isi, bui, fwi, date,     historical_fire, dc_trend_7d=0.0, bui_trend_7d=0.0):
+
+        province = self.get_province(lat, lon) 
+        day_of_year = date.timetuple().tm_yday
+        month = date.month
+
+        row = {
+            "ffmc": ffmc, "dmc": dmc, "dc": dc, "isi": isi, "bui": bui, "fwi": fwi,
+            "day_of_year": day_of_year, "month": month,
+            "dc_trend_7d": dc_trend_7d, "bui_trend_7d": bui_trend_7d,
+            "historical_fire": historical_fire,
+        }
+        for prov_col in self.ml_feature_schema["province_dummy_columns"]:
+            row[prov_col] = 1 if prov_col == f"prov_{province}" else 0
+
+        X = pd.DataFrame([row])[self.ml_feature_schema["full_column_order"]]
+        raw_score = self.ml_model.predict_proba(X)[0, 1]
+
+        bounds = self.ml_tier_thresholds["tier_bounds"]
+        names = self.ml_tier_thresholds["tier_names"]
+        fire_rates = self.ml_tier_thresholds["tier_actual_fire_rates"]
+
+        for i in range(len(bounds) - 1):
+            if bounds[i] <= raw_score <= bounds[i + 1]:
+                return names[i], fire_rates[i]
+        return names[-1], fire_rates[-1]
         
     def load_historical_weather(self, days_back=45):  
         """Load historical weather data for FWI accumulation"""
@@ -546,16 +584,20 @@ class FireWeatherProcessor:
                             'bui': 10.0, 'fwi': 5.0, 'dsr': 1.0
                         }
                     
-                    # Get danger classification (pure FWI, no adjustments)
-                    danger_class, fwi_value, color = self.fwi_calculator.get_danger_class(fwi_data['fwi'])
-                    
-                    # Historical fire zone adjustment (15% boost)
-                    # This is a valid heuristic - areas that burned before are statistically more fire-prone
-                    adjusted_fwi = fwi_value
-                    if row.get('historical_fire', 0) == 1:
-                        adjusted_fwi = min(100, fwi_value * 1.15)
-                        # Recalculate danger class with adjusted FWI
-                        danger_class, adjusted_fwi, color = self.fwi_calculator.get_danger_class(adjusted_fwi)
+                    # ML-based danger classification 
+                    today_date = pd.to_datetime(row.get('date', datetime.now().isoformat()))
+
+                    danger_class, risk_prob = self.get_ml_danger_class(
+                        lat=lat, lon=lon,
+                        ffmc=fwi_data['ffmc'], dmc=fwi_data['dmc'], dc=fwi_data['dc'],
+                        isi=fwi_data['isi'], bui=fwi_data['bui'], fwi=fwi_data['fwi'],
+                        date=today_date,
+                        historical_fire=row.get('historical_fire', 0),
+                        dc_trend_7d=fwi_data.get('dc_trend_7d', 0.0),
+                        bui_trend_7d=fwi_data.get('bui_trend_7d', 0.0),
+                    )
+                    color = DANGER_CLASS_COLORS[danger_class]
+                    adjusted_fwi = fwi_data['fwi'] 
                     
                     # Ensure FWI is valid
                     if np.isnan(adjusted_fwi) or np.isinf(adjusted_fwi):
@@ -600,7 +642,7 @@ class FireWeatherProcessor:
                             'dsr': fwi_data['dsr']
                         },
                         'historical_fire_zone': bool(row.get('historical_fire', 0)),
-                        'model_confidence': 0.95
+                        'model_confidence': risk_prob
                     }
                     
                     result = self.sanitize_dict_for_json(result_raw)
