@@ -6,6 +6,8 @@ model_components/
 
 weather_data/
 
+weather_data_archive_2025/
+
 data/ 
 
 daily_update.log
