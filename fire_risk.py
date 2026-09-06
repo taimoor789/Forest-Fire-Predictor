@@ -437,70 +437,42 @@ class FireWeatherProcessor:
         return combined
     
     def calculate_accumulated_fwi(self, location_history):
-        """
-        Calculate FWI codes accumulated over time for one location.
-        Uses seasonal initial values for realistic starting conditions.
-        """
-        # Sort by date
         location_history = location_history.sort_values('file_date')
-        
-        # Get current month for seasonal initial codes
-        current_month = datetime.now().month
-        
-        # Determine if we have enough history for full accumulation
-        if len(location_history) >= 45:
-            # Full 45-day history: start from seasonal defaults and accumulate
-            logger.debug("Using full 45-day accumulation")
-            initial_codes = self.fwi_calculator.get_seasonal_initial_codes(current_month)
-            ffmc = initial_codes['ffmc']
-            dmc = initial_codes['dmc']
-            dc = initial_codes['dc']
-            season_name = initial_codes['season_name']
-        else:
-            # Partial history: use seasonal defaults
-            logger.debug(f"Using seasonal initial codes (only {len(location_history)} days of history)")
-            initial_codes = self.fwi_calculator.get_seasonal_initial_codes(current_month)
-            ffmc = initial_codes['ffmc']
-            dmc = initial_codes['dmc']
-            dc = initial_codes['dc']
-            season_name = initial_codes['season_name']
-        
-        # Accumulate day by day using official FWI formulas
+
+        ffmc, dmc, dc = 85, 6, 15
+        daily_codes = [] 
+
         for _, day in location_history.iterrows():
             temp = day.get('temperature', 15)
             humidity = day.get('humidity', 50)
             wind = day.get('wind_speed', 10)
-            rain = (day.get('rain_1h_mm', 0) + day.get('rain_3h_mm', 0) + 
-                   day.get('snow_1h_mm', 0) + day.get('snow_3h_mm', 0))
-            
+            rain = (day.get('rain_1h_mm', 0) + day.get('rain_3h_mm', 0) +
+                day.get('snow_1h_mm', 0) + day.get('snow_3h_mm', 0))
+
             month = pd.to_datetime(day['file_date']).month
-            
-            # Update codes based on this day's weather (pure FWI algorithm)
+
             ffmc = self.fwi_calculator.calculate_ffmc(temp, humidity, wind, rain, ffmc)
             dmc = self.fwi_calculator.calculate_dmc(temp, humidity, rain, dmc, month)
             dc = self.fwi_calculator.calculate_dc(temp, rain, dc, month)
-        
-        # Calculate final indices from accumulated codes
-        # Use today's weather for spread indices
-        today = location_history.iloc[-1]
-        current_wind = today.get('wind_speed', 10)
-        
-        isi = self.fwi_calculator.calculate_isi(current_wind, ffmc)
+            daily_codes.append({'dmc': dmc, 'dc': dc}) 
+
+        isi = self.fwi_calculator.calculate_isi(wind, ffmc)
         bui = self.fwi_calculator.calculate_bui(dmc, dc)
         fwi = self.fwi_calculator.calculate_fwi(isi, bui)
-        dsr = 0.0272 * fwi ** 1.77  # Daily Severity Rating
-        
+        dsr = 0.0272 * fwi ** 1.77
+
+        if len(daily_codes) >= 8:
+            codes_7d_ago = daily_codes[-8]  # 7 days before the most recent day
+            dc_trend_7d = dc - codes_7d_ago['dc']
+            bui_7d_ago = self.fwi_calculator.calculate_bui(codes_7d_ago['dmc'], codes_7d_ago['dc'])
+            bui_trend_7d = bui - bui_7d_ago
+        else:
+            dc_trend_7d = 0.0  
+            bui_trend_7d = 0.0 
+
         result = {
-            'ffmc': ffmc,
-            'dmc': dmc,
-            'dc': dc,
-            'isi': isi,
-            'bui': bui,
-            'fwi': fwi,
-            'dsr': dsr
+            'ffmc': ffmc, 'dmc': dmc, 'dc': dc, 'isi': isi, 'bui': bui, 'fwi': fwi, 'dsr': dsr, 'dc_trend_7d': dc_trend_7d, 'bui_trend_7d': bui_trend_7d,  
         }
-        
-        # Sanitize all values before returning
         return self.sanitize_dict_for_json(result)
     
     def process_all_locations(self, weather_file=None):
