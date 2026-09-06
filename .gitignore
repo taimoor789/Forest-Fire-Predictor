@@ -6,6 +6,8 @@ model_components/
 
 weather_data/
 
+data/ 
+
 daily_update.log
 
 venv/
@@ -26,3 +28,4 @@ logs/
 /forest-fire-api.zip
 /deployment.zip
 /.DS_Store
+
