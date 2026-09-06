@@ -4,8 +4,8 @@ import json
 import requests
 import pandas as pd
 
-LOCATIONS_FILE = "locations_to_pull.csv"
-TILES_FILE = "needed_tiles.csv"
+LOCATIONS_FILE = "../data/locations_to_pull.csv"
+TILES_FILE = "../data/needed_tiles.csv"
 OUTPUT_FILE = "nasa_power_weather_2023.csv"
 PROGRESS_FILE = "nasa_power_progress.json"
 

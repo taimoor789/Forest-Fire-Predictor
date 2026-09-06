@@ -2,7 +2,7 @@ import pandas as pd
 from shapely.geometry import Point
 import geopandas as gpd
 
-grid_gdf = pd.read_csv("canada_fire_grid.csv") 
+grid_gdf = pd.read_csv("data/canada_fire_grid.csv")
 
 # Define some representative stations/cities
 stations = [
@@ -74,6 +74,6 @@ for point in grid_gdf.geometry:
 #Save mapping
 grid_gdf["nearest_station_name"] = nearest_station_index
 
-grid_gdf[["lat", "lon", "nearest_station_name"]].to_csv("stations.csv", index=False)
+grid_gdf[["lat", "lon", "nearest_station_name"]].to_csv("data/stations.csv", index=False)
 
 print("Nearest station mapping saved")

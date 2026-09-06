@@ -20,7 +20,7 @@ if not API_KEY:
 
 # Read nearest station mapping
 try:
-    mapping_df = pd.read_csv("stations.csv")
+    mapping_df = pd.read_csv("data/stations.csv")
     logger.info(f"Loaded {len(mapping_df)} grid cells from stations.csv")
 except FileNotFoundError:
     logger.error("stations.csv not found!")

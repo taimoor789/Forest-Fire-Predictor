@@ -1,8 +1,8 @@
 import pandas as pd
 
 WEATHER_FILE = "nasa_power_weather_2023.csv"
-LOCATIONS_FILE = "locations_to_pull.csv"
-OUTPUT_FILE = "nasa_power_weather_filtered.csv"
+LOCATIONS_FILE = "../data/locations_to_pull.csv"
+OUTPUT_FILE = "../data/nasa_power_weather_filtered.csv"
 
 
 def snap_to_grid(lat, lon, step=0.5):

@@ -538,7 +538,7 @@ class FireWeatherProcessor:
         
         # Add historical fire context
         try:
-            fire_df = pd.read_csv("canada_fire_grid.csv", usecols=['lat', 'lon', 'historical_fire'])
+            fire_df = pd.read_csv("data/canada_fire_grid.csv", usecols=['lat', 'lon', 'historical_fire'])
             today_data = today_data.merge(fire_df, on=['lat', 'lon'], how='left')
             today_data['historical_fire'] = today_data['historical_fire'].fillna(0).astype('int8')
         except FileNotFoundError:
