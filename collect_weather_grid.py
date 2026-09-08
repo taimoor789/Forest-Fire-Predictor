@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 import os
 import time 
 from logging_config import setup_logging, get_logger
+import json
 
 setup_logging()
 logger = get_logger(__name__)
@@ -14,7 +15,9 @@ RETRY_DELAY = 5  #Seconds to wait between retries
 REQUEST_TIMEOUT = 10 #Seconds before request times out
 
 # Load API key with validation
-API_KEY = os.environ.get("OPENWEATHER_API_KEY")
+with open("config.json") as f:
+    config = json.load(f)
+API_KEY = config["openweather_api_key"]
 if not API_KEY:
     raise ValueError("OPENWEATHER_API_KEY environment variable not set")
 
@@ -181,7 +184,6 @@ failed_fetches = 0
 for i, station in enumerate(unique_stations, 1):
     if station in station_coords:
         lat, lon = station_coords[station]
-        logger.info(f"Fetching weather for {station} ({i}/{len(unique_stations)})...")
         
         weather = get_weather(lat, lon)
         
