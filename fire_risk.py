@@ -169,99 +169,70 @@ class CanadianFireWeatherIndex:
         return float(ffmc)
     
     def calculate_dmc(self, temp, humidity, rain, prev_dmc=6, month=7):
-        """
-        Duff Moisture Code (DMC)
-        
-        Represents moisture content of loosely compacted organic layers 
-        (10-20 cm deep, ~15 day timelag). This is the decomposing organic 
-        matter beneath the litter layer.
-        
-        """
-        # Sanitize inputs
         temp = self.sanitize_value(temp, 15, -50, 50)
         humidity = self.sanitize_value(humidity, 50, 1, 100)
         rain = self.sanitize_value(rain, 0, 0, 500)
         prev_dmc = self.sanitize_value(prev_dmc, 6, 0, 500)
-        
-        # No drying when temperature below -1.1
-        if temp < -1.1:
-            return prev_dmc
-        
-        # Day length factors (varies by month and latitude)
-        # These are for 46°N latitude (southern Canada)
-        day_lengths = [-1.6, -1.6, -1.6, 0.9, 3.8, 5.8, 6.4, 5.0, 2.4, 0.4, -1.6, -1.6]
-        le = day_lengths[month - 1] if 1 <= month <= 12 else 1.4
-        
-        # Rain effect - wetting of duff layer
-        re = prev_dmc
+
+
+        DMC_LE = [6.5, 7.5, 9.0, 12.8, 13.9, 13.9, 12.4, 10.9, 9.4, 8.0, 7.0, 6.0]
+        le = DMC_LE[month - 1] if 1 <= month <= 12 else 9.0
+
+        dmc_after_rain = prev_dmc  # base for drying if there's no rain today
+
         if rain > 1.5:
-            rw = 0.92 * rain - 1.27
-            wmi = 20 + 280 / np.exp(0.023 * prev_dmc)
-            
-            if prev_dmc <= wmi:
+            pe = 0.92 * rain - 1.27  # effective rainfall
+
+            # moisture equivalent of yesterday's DMC
+            wmi = 20 + np.exp(5.6348 - prev_dmc / 43.43)
+
+            if prev_dmc <= 33:
                 b = 100 / (0.5 + 0.3 * prev_dmc)
+            elif prev_dmc <= 65:
+                b = 14 - 1.3 * np.log(prev_dmc)
             else:
-                b = 14 - 1.3 * np.log(prev_dmc + 1)
-            
-            mr = prev_dmc + 1000 * rw / (48.77 + b * rw)
-            re = max(0, mr)
-        
-        # Drying
-        if temp > -1.1:
-            k = 1.894 * (temp + 1.1) * (100 - humidity) * le * 0.000001
-            dmc = re + 100 * k
-        else:
-            dmc = re
-        
+                b = 6.2 * np.log(prev_dmc) - 17.2
+
+            # base is wmi (moisture equivalent)
+            mr = wmi + 1000 * pe / (48.77 + b * pe)
+
+            # convert back from moisture units to DMC units
+            dmc_after_rain = 244.72 - 43.43 * np.log(mr - 20)
+            dmc_after_rain = max(0, dmc_after_rain)
+
+        temp_for_k = max(temp, -1.1)
+        k = 1.894 * (temp_for_k + 1.1) * (100 - humidity) * le * 1e-6
+
+        dmc = dmc_after_rain + 100 * k
         dmc = max(0, dmc)
-        
-        # Sanity check
+
         if np.isnan(dmc) or np.isinf(dmc):
             return 6
         return float(dmc)
     
     def calculate_dc(self, temp, rain, prev_dc=15, month=7):
-        """
-        Drought Code (DC)
-        
-        Represents moisture content of deep, compact organic layers 
-        (10-20 cm deep, ~50 day timelag). This is the long-term drought 
-        indicator tracking deep soil moisture.
-        
-        """
-        # Sanitize inputs
         temp = self.sanitize_value(temp, 15, -50, 50)
         rain = self.sanitize_value(rain, 0, 0, 500)
         prev_dc = self.sanitize_value(prev_dc, 15, 0, 1000)
-        
-        # No drying when temperature below -2.8
-        if temp < -2.8:
-            return prev_dc
-        
-        # Day length factors for potential evapotranspiration
-        lf_day = [-1.6, -1.6, -1.6, 0.9, 3.8, 5.8, 6.4, 5.0, 2.4, 0.4, -1.6, -1.6]
-        lf = lf_day[month - 1] if 1 <= month <= 12 else 1.4
-        
-        # Rain effect - wetting of deep layers
-        rd = prev_dc
+
+        DC_LF = [-1.6, -1.6, -1.6, 0.9, 3.8, 5.8, 6.4, 5.0, 2.4, 0.4, -1.6, -1.6]
+        lf = DC_LF[month - 1] if 1 <= month <= 12 else 1.4
+
+        dc_after_rain = prev_dc
+
         if rain > 2.8:
-            ra = rain
-            rw = 0.83 * ra - 1.27
+            pd = 0.83 * rain - 1.27
             smi = 800 * np.exp(-prev_dc / 400)
-            dr = prev_dc - 400 * np.log(1 + 3.937 * rw / smi)
-            rd = max(0, dr)
-        
-        # Potential evapotranspiration
-        if temp > -2.8:
-            v = 0.36 * (temp + 2.8) + lf
-            v = max(0, v)
-            dc = rd + v
-        else:
-            dc = rd
-        
+            dr = prev_dc - 400 * np.log(1 + 3.937 * pd / smi)
+            dc_after_rain = max(0, dr)
+
+        temp_for_v = max(temp, -2.8)
+        v = 0.36 * (temp_for_v + 2.8) + lf
+        v = max(0, v)
+
+        dc = dc_after_rain + 0.5 * v
         dc = max(0, dc)
-        
-        # Sanity check
+
         if np.isnan(dc) or np.isinf(dc):
             return 15
         return float(dc)
@@ -798,7 +769,6 @@ def main():
     print(f"✓ Using 45 days of historical weather accumulation")
     print(f"✓ Seasonal initial codes applied for {processor.fwi_calculator.get_seasonal_initial_codes(datetime.now().month)['season_name']}")
     print(f"✓ Processed {len(results)} locations successfully")
-    print(f"✓ Algorithm: Pure CFWIS (Van Wagner, 1987) - No FWI modifications")
     print("=" * 70)
 
 if __name__ == "__main__":
