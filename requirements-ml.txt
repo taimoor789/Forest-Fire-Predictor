@@ -1,0 +1,17 @@
+# Dependencies for the ml/ rebuild pipeline only (training-time, not serving-time).
+# Deliberately kept out of requirements.txt (the deploy-time list) so the
+# Elastic Beanstalk bundle doesn't grow a geospatial/ML-training stack it
+# never needs at serve time -- fire_risk.py's live path only ever loads a
+# fitted model + json schema, never geopandas/shapely/lightgbm/shap directly.
+#
+# geopandas/shapely/pyproj were already present in venv/ before this file
+# existed (used by build_weather_data_files.py's cKDTree gap-fill and the
+# notebook's spatial joins); pinned here for the first time.
+
+geopandas==1.0.1
+shapely==2.0.7
+pyproj==3.6.1
+scikit-learn==1.6.1
+lightgbm==4.6.0
+pyarrow==21.0.0
+shap==0.49.1
