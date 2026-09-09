@@ -1,22 +1,21 @@
 # Forest Fire Risk Predictor - Backend
 
-> **Production-grade fire risk assessment API powered by Canada's official Fire Weather Index System**
+> **Fire risk assessment API built on the Canadian Fire Weather Index (FWI1987) System**
 
-A Python-based backend that processes real-time weather data and calculates fire danger levels for 15,000+ locations across Canada, updated hourly with 30-day historical weather accumulation.
+A Python-based backend that processes weather data and calculates fire danger levels for ~15,000 grid cells across Canada, using persisted daily FFMC/DMC/DC accumulation with seasonal reinitialization.
 
 ---
 
 ## Overview
 
-The backend implements Environment Canada's **Canadian Fire Weather Index (FWI) System** - the official algorithm used by Canadian wildfire agencies for fire danger rating.
+The backend implements the **Canadian Fire Weather Index (FWI1987) System** (Van Wagner, 1987) — the standard fire weather index formulas used across Canadian wildfire agencies, though exact danger-class boundaries vary by provincial/territorial agency.
 
 ### **Key Capabilities**
-- 🌡️ **Real-time weather** from 38 stations via OpenWeather API
-- 📍 **15,000+ grid cells** covering all of Canada (50km × 50km resolution)
-- 📈 **30-day accumulation** for accurate moisture codes
-- ⚡ **Hourly updates** via automated cron jobs
-- 🎯 **Official FWI algorithm** (FFMC, DMC, DC, ISI, BUI, FWI, DSR)
-- 🔒 **Production deployment** on AWS Elastic Beanstalk
+- 🌡️ **Gridded weather** for every cell individually, from Open-Meteo
+- 📍 **~15,000 grid cells** covering all of Canada (0.5° resolution)
+- 📈 **Persisted daily accumulation** per cell, with seasonal reinitialization on first run or after a data gap
+- 🎯 **FWI1987 algorithm** (FFMC, DMC, DC, ISI, BUI, FWI, DSR)
+- ⚠️ **Not currently scheduled** — see Deployment below
 
 ---
 
@@ -26,11 +25,10 @@ The backend implements Environment Canada's **Canadian Fire Weather Index (FWI) 
 |-----------|-----------|---------|
 | **API Framework** | FastAPI | High-performance REST API with automatic docs |
 | **Data Processing** | Pandas + NumPy | Efficient manipulation of weather/fire data |
-| **Weather API** | OpenWeather | Real-time weather for 38 Canadian stations |
-| **FWI Algorithm** | Custom Implementation | Official Canadian Fire Weather Index formulas |
-| **Deployment** | AWS Elastic Beanstalk | Auto-scaling, monitoring, zero-downtime updates |
-| **Task Scheduling** | Linux Cron | Hourly automated weather collection |
-| **Storage** | Local CSV + JSON | 30-day weather history + cached predictions |
+| **Weather API** | Open-Meteo | Gridded forecast weather, one pull per grid cell |
+| **FWI Algorithm** | Custom Implementation | FWI1987 (Van Wagner, 1987) formulas |
+| **Task Scheduling** | *(none currently — see Deployment)* | |
+| **Storage** | Local CSV + JSON | Weather history, persisted FWI state, cached predictions |
 
 ---
 
@@ -55,13 +53,15 @@ The **Canadian Fire Weather Index (FWI) System** is the official method used by 
 
 ### **Danger Classes**
 
+These are this system's own FWI1987 threshold boundaries (`get_danger_class()` in `fire_risk.py`) — exact boundaries vary by provincial/territorial fire agency, so treat this as one reasonable set, not a single official ECCC standard.
+
 | FWI Range | Class | Color | Description |
 |-----------|-------|-------|-------------|
-| 0-1 | Very Low | 🟢 Green | Fires start with difficulty |
-| 1-3 | Low | 🟡 Yellow-Green | Fires spread slowly |
-| 3-7 | Moderate | 🟡 Yellow | Moderate fire behavior |
-| 7-17 | High | 🟠 Orange | High fire intensity |
-| 17-30 | Very High | 🔴 Red | Extreme fire behavior |
+| 0-2 | Very Low | 🟢 Green | Fires start with difficulty |
+| 2-4 | Low | 🟡 Yellow-Green | Fires spread slowly |
+| 4-8 | Moderate | 🟡 Yellow | Moderate fire behavior |
+| 8-18 | High | 🟠 Orange | High fire intensity |
+| 18-30 | Very High | 🔴 Red | Extreme fire behavior |
 | 30+ | Extreme | 🟣 Purple | Explosive fire growth |
 
 ---
@@ -69,29 +69,33 @@ The **Canadian Fire Weather Index (FWI) System** is the official method used by 
 ## Data Sources
 
 ### **Weather Data**
-- **Provider:** OpenWeather API
-- **Frequency:** Hourly
-- **Stations:** 38 major Canadian locations
-- **Coverage:** All provinces and territories
+- **Provider:** Open-Meteo (gridded forecast API, pulled per grid cell)
+- **Frequency:** Once per day (see Deployment)
+- **Coverage:** All ~15,000 grid cells individually — no station interpolation
 
 ### **Historical Fire Data**
 - **Source:** Natural Resources Canada - National Fire Database (NFDB)
-- **Purpose:** Historical fire occurrence for risk adjustment
+- **Purpose:** Historical fire occurrence context
 - **Format:** Shapefile → Grid mapping
 
 ### **FWI Algorithm**
-- **Authority:** Environment and Climate Change Canada
-- **Standard:** Official Canadian Forest Service formulas
+- **Standard:** FWI1987 (Van Wagner, 1987)
 - **Reference:** [CWFIS Fire Weather Index](https://cwfis.cfs.nrcan.gc.ca/background/summary/fwi)
+
+---
+
+## Deployment
+
+The previous AWS Elastic Beanstalk deployment expired, so no scheduled cron currently runs this pipeline in production. `daily_update.py --pipeline-only` runs the full pipeline (weather collection + FWI calculation) locally or from any scheduler; a migration to a managed host + scheduled job is planned but not yet implemented.
 
 ---
 
 ## Acknowledgments
 
-- **Environment and Climate Change Canada** - FWI System development
+- **Van Wagner, C.E.** - FWI System development (Van Wagner, 1987; Van Wagner & Pickett, 1985)
 - **Canadian Forest Service** - Fire weather research
 - **Natural Resources Canada** - National Fire Database
-- **OpenWeather** - Weather API services
+- **Open-Meteo** - Weather API services
 
 ---
 
