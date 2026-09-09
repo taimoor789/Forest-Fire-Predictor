@@ -1,5 +1,5 @@
 cron_logs.txt
-
+__pycache__/
 config.json
 
 model_components/
@@ -26,7 +26,6 @@ logs/
 /fwi_predictions.json
 /fwi_predictions_OLD_backup.json
 /Procfile
-/requirements.txt
 /model_info.json
 /forest-fire-api.zip
 /deployment.zip
