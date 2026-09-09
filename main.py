@@ -33,10 +33,8 @@ class ModelInfoResponse(BaseModel):
     """Model metadata endpoint response"""
     model_type: str
     methodology: str
-    r2_score: float
-    mse: float
-    mae: float
-    risk_range: List[float]
+    fwi_standard: str
+    danger_class_thresholds: str
     features: List[str]
     version: str
     last_trained: str
@@ -117,8 +115,8 @@ async def lifespan(app: FastAPI):
             logger.warning("model_info.json not found - using defaults")
             system_info_data = {
                 "model_type": "Canadian Fire Weather Index System",
-                "methodology": "45-Day Historical Weather Accumulation",
-                "r2_score": 0.95,
+                "methodology": "Persisted daily FFMC/DMC/DC accumulation with seasonal reinitialization",
+                "fwi_standard": "FWI1987 (Van Wagner, 1987)",
                 "last_trained": datetime.now().isoformat()
             }
     except Exception as e:
@@ -424,16 +422,15 @@ async def get_model_info():
         
         return ModelInfoResponse(
             model_type=system_info_data.get("model_type", "Canadian Fire Weather Index System"),
-            methodology=system_info_data.get("methodology", "Environment and Climate Change Canada Official Algorithm"),
-            r2_score=system_info_data.get("r2_score", 0.95),
-            mse=system_info_data.get("mse", 0.001),
-            mae=system_info_data.get("mae", 0.01),
-            risk_range=system_info_data.get("risk_range", [0.05, 0.95]),
-            features=["FFMC", "DMC", "DC", "ISI", "BUI", "FWI", "Temperature", "Humidity", "Wind", "Precipitation"],
+            methodology=system_info_data.get("methodology", "Persisted daily FFMC/DMC/DC accumulation with seasonal reinitialization"),
+            fwi_standard=system_info_data.get("fwi_standard", "FWI1987 (Van Wagner, 1987)"),
+            danger_class_thresholds="FWI < 2 Very Low | < 4 Low | < 8 Moderate | < 18 High | < 30 Very High | >= 30 Extreme",
+            features=["FFMC", "DMC", "DC", "ISI", "BUI", "FWI", "DSR"],
             version="2.0.0",
             last_trained=system_info_data.get("last_trained", "unknown"),
             training_records=training_records,
-            confidence="High - Based on established fire weather science"
+            confidence="Physics-based FWI1987 implementation (Van Wagner, 1987), not a fitted "
+                       "statistical model -- no accuracy/error metrics apply"
         )
     except Exception as e:
         logger.error(f"Error getting model info: {e}")
@@ -523,13 +520,20 @@ async def retrain_system(request: Optional[RetrainRequest] = None):
                         timestamp=datetime.now().isoformat()
                     )
         
-        # Run data pipeline as subprocess
+        # Run data pipeline as subprocess.
+        # collect_weather_grid.py now pulls each of the 14,952 grid cells
+        # individually from Open-Meteo (replacing the old 38-station
+        # collector), paced to stay under Open-Meteo's documented 600
+        # calls/minute free-tier limit -- a full fetch takes ~37 minutes.
+        # It's also idempotent (skips re-fetching if today's file already
+        # exists), so repeated same-day triggers after the first are fast;
+        # only a cold start or force=true pays the full cost.
         result = subprocess.run(
             [sys.executable, "daily_update.py", "--pipeline-only"],
             capture_output=True, # Capture stdout/stderr
             text=True, # Return as strings
             check=True, # Raise exception on non-zero exit
-            timeout=300 # 5 minute timeout
+            timeout=3000 # 50 minutes: covers a full cold-start weather fetch plus retries
         )
 
         # Reload system components after successful pipeline run
@@ -552,7 +556,7 @@ async def retrain_system(request: Optional[RetrainRequest] = None):
         
     except subprocess.TimeoutExpired:
         logger.error("System refresh timed out")
-        raise HTTPException(status_code=504, detail="System refresh timed out (>5 minutes)")
+        raise HTTPException(status_code=504, detail="System refresh timed out (>50 minutes)")
     except subprocess.CalledProcessError as e:
         logger.error(f"System refresh failed: {e.stderr}")
         raise HTTPException(status_code=500, detail=f"System refresh failed: {e.stderr}")
@@ -621,18 +625,22 @@ async def get_system_stats():
 
 @app.get("/api/danger-classes")
 async def get_danger_classes():
-    """Get fire danger class definitions and color codes. Returns official FWI danger classifications for frontend display."""
+    """Get fire danger class definitions and color codes.
+
+    These match the exact thresholds get_danger_class() in fire_risk.py
+    classifies with -- keep the two in sync if either changes.
+    """
     return {
         "danger_classes": [
-            {"name": "Very Low", "range": "0-1 FWI", "color": "#4CAF50", "description": "Fires start easily but spread slowly"},
-            {"name": "Low", "range": "1-3 FWI", "color": "#8BC34A", "description": "Fires start easily and spread at low to moderate rates"},
-            {"name": "Moderate", "range": "3-7 FWI", "color": "#FFEB3B", "description": "Fires start easily and spread at moderate rates"},
-            {"name": "High", "range": "7-17 FWI", "color": "#FF9800", "description": "Fires start easily and spread at high rates"},
-            {"name": "Very High", "range": "17-30 FWI", "color": "#F44336", "description": "Fires start very easily and spread at very high rates"},
+            {"name": "Very Low", "range": "0-2 FWI", "color": "#4CAF50", "description": "Fires start easily but spread slowly"},
+            {"name": "Low", "range": "2-4 FWI", "color": "#8BC34A", "description": "Fires start easily and spread at low to moderate rates"},
+            {"name": "Moderate", "range": "4-8 FWI", "color": "#FFEB3B", "description": "Fires start easily and spread at moderate rates"},
+            {"name": "High", "range": "8-18 FWI", "color": "#FF9800", "description": "Fires start easily and spread at high rates"},
+            {"name": "Very High", "range": "18-30 FWI", "color": "#F44336", "description": "Fires start very easily and spread at very high rates"},
             {"name": "Extreme", "range": "30+ FWI", "color": "#9C27B0", "description": "Fires start very easily and spread at extreme rates"}
         ],
-        "system": "Canadian Fire Weather Index",
-        "authority": "Environment and Climate Change Canada"
+        "system": "Canadian Fire Weather Index (FWI1987 / Van Wagner, 1987)",
+        "note": "Exact class boundaries vary by provincial/territorial fire agency; these are this system's own thresholds, not a single official ECCC standard."
     }
 
 if __name__ == "__main__":
