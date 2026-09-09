@@ -54,7 +54,7 @@ human-readable index, not the source of truth.
 |---|---|---|
 | `data/grid_domain_v1.parquet` | 1 | **built** — 7,537/14,952 cells (50.4%) in Canada after a real land-mask (vs. the original audit's rough box-estimate of ~71.5% in-domain); Arctic (>=70.5N) is 29.76% of in-domain cells by count but 14.98% by area |
 | `data/historical_fire_by_year.parquet` | 2 | **built** — 45,222 rows (7,537 in-domain cells × 6 target years). Full NFDB archive (448,284 valid fires, 1930–2025) attributed to nearest in-domain cell (99.98% attributed, vs. the old buffer join's 82.6%). `hist_fire_any_prior` rate ~50–52% across target years. Leak-freedom verified by `test_historical_fire_leakage.py`, including a negative control confirming it catches a simulated leak. |
-| `data/ground_truth_{year}.parquet` | 3 | not yet built |
+| `data/ground_truth_by_year.parquet` | 3 | **built** — 22,589 (cell, date) rows across 2019–2023. Nearest-cell attribution: 99.99% of in-scope fires attributed (vs. the original 25km buffer's 82.6%), median distance 17.3km. `data/ground_truth_buffer_sensitivity.parquet` is the 30km-buffer sensitivity variant (97.7% of fires matched, 14,822 multi-attributed pairs — buffers allow one fire to match several cells, unlike Voronoi). |
 | `data/labels_{year}.parquet` | 4 | not yet built |
 | `data/fwi_replay_{year}.parquet` | 6 | not yet built |
 | `data/dataset_{years}.parquet` | 7 | not yet built |
