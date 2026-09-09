@@ -24,6 +24,7 @@ logs/
 /.ebextensions
 /.ebignore
 /fwi_predictions.json
+/fwi_predictions_OLD_backup.json
 /Procfile
 /requirements.txt
 /model_info.json
