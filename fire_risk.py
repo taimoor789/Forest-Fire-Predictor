@@ -315,15 +315,16 @@ class CanadianFireWeatherIndex:
     
     def get_danger_class(self, fwi):
         """
-        Official Canadian Fire Danger Classification
-        
-        These danger classes are defined by Environment and Climate Change Canada.
+        Canadian FWI1987 Fire Danger Classification
+
+        These are the FWI1987 (Van Wagner, 1987) danger class boundaries.
         They represent fire behavior potential, not ignition probability.
+        Exact class boundaries vary by provincial/territorial fire agency;
+        these are not a single official ECCC standard.
 
         """
         fwi = self.sanitize_value(fwi, 5, 0, 100)
-        
-        # Official danger class thresholds
+
         if fwi < 2:
             return "Very Low", fwi, "#4CAF50"
         elif fwi < 4:
@@ -337,18 +338,51 @@ class CanadianFireWeatherIndex:
         else:
             return "Extreme", fwi, "#9C27B0"
 
+FWI_STATE_FILE = "data/fwi_state.json"
+GAP_REINIT_DAYS = 3     # a gap this long or longer triggers a seasonal reinit
+                        # rather than continuing from stale persisted codes
+TREND_HISTORY_DAYS = 8  # need 7 days back plus today for dc_trend_7d/bui_trend_7d
+
 class FireWeatherProcessor:
-    
+
     def __init__(self):
         self.fwi_calculator = CanadianFireWeatherIndex()
         self.processing_stats = {}
 
-        self.ml_model = joblib.load("model_components/fire_risk_ml_model.pkl")
-        with open("model_components/fire_risk_ml_features.json") as f:
-            self.ml_feature_schema = json.load(f)
-        with open("model_components/ml_tier_thresholds.json") as f:
-            self.ml_tier_thresholds = json.load(f)
-    
+        # The ML danger-classification layer (get_ml_danger_class below) is
+        # parked, not deleted: it was trained on leaked labels, saturated
+        # features, and buggy formulas (see the Phase 1 audit), so
+        # process_all_locations classifies with the FWI thresholds directly
+        # instead. Its model/schema/thresholds are intentionally not loaded
+        # here -- Phase 2 will need to retrain and reload them properly
+        # before this can be revived.
+
+    def _cell_key(self, lat, lon):
+        return f"{lat:.4f}_{lon:.4f}"
+
+    def load_fwi_state(self):
+        """Load each cell's persisted FFMC/DMC/DC + trend history from the last run."""
+        if os.path.exists(FWI_STATE_FILE):
+            try:
+                with open(FWI_STATE_FILE) as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load {FWI_STATE_FILE}: {e}; starting fresh for all cells")
+        return {}
+
+    def save_fwi_state(self, state):
+        """Persist state atomically so a crash mid-write can't leave a truncated file."""
+        os.makedirs(os.path.dirname(FWI_STATE_FILE) or ".", exist_ok=True)
+        tmp_path = FWI_STATE_FILE + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp_path, FWI_STATE_FILE)
+
+    def _num_or(self, row, col, default=0.0):
+        """Get row[col] as a plain number, treating a missing column or NaN as default."""
+        val = row.get(col, default)
+        return default if pd.isna(val) else val
+
     def sanitize_for_json(self, value):
         """Convert any invalid float to a valid JSON-compliant number"""
         if value is None:
@@ -395,8 +429,10 @@ class FireWeatherProcessor:
         names = self.ml_tier_thresholds["tier_names"]
         fire_rates = self.ml_tier_thresholds["tier_actual_fire_rates"]
 
-        for i in range(len(bounds) - 1):
-            if bounds[i] <= raw_score <= bounds[i + 1]:
+        # Half-open bins: [bounds[i], bounds[i+1]) so a score sitting exactly
+        # on a boundary lands in the tier above it, not the one below.
+        for i in range(len(bounds) - 2):
+            if bounds[i] <= raw_score < bounds[i + 1]:
                 return names[i], fire_rates[i]
         return names[-1], fire_rates[-1]
         
@@ -424,16 +460,48 @@ class FireWeatherProcessor:
                     'humidity': 'float32',
                     'wind_speed': 'float32',
                     'pressure': 'float32',
+                    'precip_24h_mm': 'float32',
+                    # legacy columns from the retired OpenWeather/station
+                    # collector -- still present in older files inside the
+                    # 45-day window; calculate_accumulated_fwi() falls back
+                    # to summing these when precip_24h_mm isn't available.
                     'rain_1h_mm': 'float32',
                     'rain_3h_mm': 'float32',
                     'snow_1h_mm': 'float32',
                     'snow_3h_mm': 'float32'
                 })
+
+                # Reject implausible/sentinel rows instead of letting
+                # sanitize_value() silently clip them into valid-looking
+                # numbers (e.g. a -999 sentinel becomes 1% humidity).
+                # A row failing any check is dropped from this day's history.
+                before = len(df)
+                valid = pd.Series(True, index=df.index)
+                if 'temperature' in df:
+                    valid &= df['temperature'].between(-60, 55)
+                if 'humidity' in df:
+                    valid &= df['humidity'].between(0, 100)
+                if 'wind_speed' in df:
+                    valid &= df['wind_speed'].between(0, 200)
+                for precip_col in ('precip_24h_mm', 'rain_1h_mm', 'rain_3h_mm', 'snow_1h_mm', 'snow_3h_mm'):
+                    if precip_col in df:
+                        valid &= df[precip_col].between(0, 500) | df[precip_col].isna()
+                df = df[valid]
+                dropped = before - len(df)
+                if dropped:
+                    logger.warning(
+                        f"{file}: dropped {dropped}/{before} rows with implausible "
+                        f"weather values (e.g. sentinel/out-of-range data)"
+                    )
+                if df.empty:
+                    logger.warning(f"{file}: no valid rows after filtering, skipping day entirely")
+                    continue
+
                 df['file_date'] = os.path.basename(file).replace('.csv', '')
                 all_data.append(df)
             except Exception as e:
                 logger.warning(f"Failed to load {file}: {e}")
-        
+
         if not all_data:
             raise ValueError("No weather data could be loaded")
         
@@ -445,53 +513,98 @@ class FireWeatherProcessor:
         
         return combined
     
-    def calculate_accumulated_fwi(self, location_history):
-        location_history = location_history.sort_values('file_date')
+    def _get_precip_24h(self, day):
+        """precip_24h_mm (Open-Meteo, a true 24h accumulation) is preferred;
+        fall back to summing the legacy hourly/3h fields for older files
+        still inside the window that predate the switch away from the
+        OpenWeather station collector."""
+        precip_24h = day.get('precip_24h_mm', None)
+        if precip_24h is not None and not pd.isna(precip_24h):
+            return precip_24h
+        return (self._num_or(day, 'rain_1h_mm') + self._num_or(day, 'rain_3h_mm') +
+            self._num_or(day, 'snow_1h_mm') + self._num_or(day, 'snow_3h_mm'))
 
-        ffmc, dmc, dc = 85, 6, 15
-        daily_codes = [] 
+    def advance_one_day(self, prev_ffmc, prev_dmc, prev_dc, recent, day, current_date):
+        """Apply one day's weather to persisted FFMC/DMC/DC codes and update
+        the trailing dc/bui history used for the 7-day trend features.
 
-        for _, day in location_history.iterrows():
-            temp = day.get('temperature', 15)
-            humidity = day.get('humidity', 50)
-            wind = day.get('wind_speed', 10)
-            rain = (day.get('rain_1h_mm', 0) + day.get('rain_3h_mm', 0) +
-                day.get('snow_1h_mm', 0) + day.get('snow_3h_mm', 0))
+        `recent` is a list of up to TREND_HISTORY_DAYS {date, dmc, dc}
+        dicts, oldest first; the entry 7 days back gives dc_trend_7d /
+        bui_trend_7d. Returns (ffmc, dmc, dc, recent, result_dict).
+        """
+        temp = day.get('temperature', 15)
+        humidity = day.get('humidity', 50)
+        wind = day.get('wind_speed', 10)
+        rain = self._get_precip_24h(day)
+        month = current_date.month
 
-            month = pd.to_datetime(day['file_date']).month
-
-            ffmc = self.fwi_calculator.calculate_ffmc(temp, humidity, wind, rain, ffmc)
-            dmc = self.fwi_calculator.calculate_dmc(temp, humidity, rain, dmc, month)
-            dc = self.fwi_calculator.calculate_dc(temp, rain, dc, month)
-            daily_codes.append({'dmc': dmc, 'dc': dc}) 
+        ffmc = self.fwi_calculator.calculate_ffmc(temp, humidity, wind, rain, prev_ffmc)
+        dmc = self.fwi_calculator.calculate_dmc(temp, humidity, rain, prev_dmc, month)
+        dc = self.fwi_calculator.calculate_dc(temp, rain, prev_dc, month)
 
         isi = self.fwi_calculator.calculate_isi(wind, ffmc)
         bui = self.fwi_calculator.calculate_bui(dmc, dc)
         fwi = self.fwi_calculator.calculate_fwi(isi, bui)
         dsr = 0.0272 * fwi ** 1.77
 
-        if len(daily_codes) >= 8:
-            codes_7d_ago = daily_codes[-8]  # 7 days before the most recent day
-            dc_trend_7d = dc - codes_7d_ago['dc']
-            bui_7d_ago = self.fwi_calculator.calculate_bui(codes_7d_ago['dmc'], codes_7d_ago['dc'])
+        recent = list(recent) + [{'date': current_date.strftime('%Y-%m-%d'), 'dmc': dmc, 'dc': dc}]
+        recent = recent[-TREND_HISTORY_DAYS:]
+
+        if len(recent) >= TREND_HISTORY_DAYS:
+            week_ago = recent[-TREND_HISTORY_DAYS]  # 7 days before the entry we just added
+            dc_trend_7d = dc - week_ago['dc']
+            bui_7d_ago = self.fwi_calculator.calculate_bui(week_ago['dmc'], week_ago['dc'])
             bui_trend_7d = bui - bui_7d_ago
         else:
-            dc_trend_7d = 0.0  
-            bui_trend_7d = 0.0 
+            dc_trend_7d = 0.0
+            bui_trend_7d = 0.0
 
         result = {
-            'ffmc': ffmc, 'dmc': dmc, 'dc': dc, 'isi': isi, 'bui': bui, 'fwi': fwi, 'dsr': dsr, 'dc_trend_7d': dc_trend_7d, 'bui_trend_7d': bui_trend_7d,  
+            'ffmc': ffmc, 'dmc': dmc, 'dc': dc, 'isi': isi, 'bui': bui, 'fwi': fwi, 'dsr': dsr,
+            'dc_trend_7d': dc_trend_7d, 'bui_trend_7d': bui_trend_7d,
         }
-        return self.sanitize_dict_for_json(result)
+        return ffmc, dmc, dc, recent, self.sanitize_dict_for_json(result)
+
+    def bootstrap_from_window(self, location_history, current_date):
+        """First-run / gap-recovery path: no persisted state to continue
+        from, so replay whatever weather history is on disk (up to 45
+        days), starting from get_seasonal_initial_codes() for the first
+        available day rather than a flat spring-startup default. Returns
+        (ffmc, dmc, dc, recent) ready to hand to advance_one_day() for
+        today.
+        """
+        location_history = location_history.sort_values('file_date')
+
+        if len(location_history) == 0:
+            seasonal = self.fwi_calculator.get_seasonal_initial_codes(current_date.month)
+            return seasonal['ffmc'], seasonal['dmc'], seasonal['dc'], []
+
+        first_date = pd.to_datetime(location_history.iloc[0]['file_date'])
+        seasonal = self.fwi_calculator.get_seasonal_initial_codes(first_date.month)
+        ffmc, dmc, dc = seasonal['ffmc'], seasonal['dmc'], seasonal['dc']
+        recent = []
+
+        for _, day in location_history.iterrows():
+            day_date = pd.to_datetime(day['file_date'])
+            ffmc, dmc, dc, recent, _ = self.advance_one_day(ffmc, dmc, dc, recent, day, day_date)
+
+        return ffmc, dmc, dc, recent
     
     def process_all_locations(self, weather_file=None):
         
         logger.info("Processing Pure Canadian Fire Weather Index System...")
         start_time = datetime.now()
-        
-        # Load historical data
-        historical_data = self.load_historical_weather(days_back=45)  
-        
+
+        # Load each cell's persisted FFMC/DMC/DC + trend history from the
+        # last run. Cells with no entry (first run) or a gap of more than
+        # GAP_REINIT_DAYS since their last entry fall back to replaying the
+        # 45-day weather window from seasonal initial codes -- see
+        # bootstrap_from_window(). Everything else continues directly from
+        # yesterday's persisted codes, which is what lets DC reach real
+        # seasonal drought values instead of resetting every run.
+        fwi_state = self.load_fwi_state()
+        historical_data = None  # lazily loaded only if a cell needs bootstrapping
+
         # Get today's data
         if weather_file is None:
             weather_files = glob.glob("weather_data/*.csv")
@@ -503,10 +616,18 @@ class FireWeatherProcessor:
             'temperature': 'float32',
             'humidity': 'float32',
             'wind_speed': 'float32',
-            'pressure': 'float32'
+            'pressure': 'float32',
+            'precip_24h_mm': 'float32'
         })
         logger.info(f"Processing {len(today_data)} locations from {weather_file}")
-        
+
+        # Same date format load_historical_weather() stamps onto each row
+        # (file_date), used below to exclude today's own file from the
+        # bootstrap replay window -- it's read separately as today_data and
+        # applied once via advance_one_day(), so replaying it too would
+        # double-apply today's weather.
+        weather_file_date_str = os.path.basename(weather_file).replace('.csv', '')
+
         # Add historical fire context
         try:
             fire_df = pd.read_csv("data/canada_fire_grid.csv", usecols=['lat', 'lon', 'historical_fire'])
@@ -533,42 +654,62 @@ class FireWeatherProcessor:
                 try:
                     lat = float(row['lat'])
                     lon = float(row['lon'])
-                    
-                    # Get history for this location
-                    location_hist = historical_data[
-                        (historical_data['lat'] == lat) & 
-                        (historical_data['lon'] == lon)
-                    ].copy()
-                    
-                    if len(location_hist) == 0:
-                        location_hist = pd.DataFrame([row])
-                        location_hist['file_date'] = datetime.now().strftime('%Y-%m-%d')
-                    
-                    # Calculate accumulated FWI (pure algorithm)
-                    fwi_data = self.calculate_accumulated_fwi(location_hist)
-                    
+                    today_date = pd.to_datetime(row.get('date', datetime.now().isoformat()))
+
+                    key = self._cell_key(lat, lon)
+                    cell_state = fwi_state.get(key)
+
+                    needs_bootstrap = cell_state is None
+                    if cell_state is not None:
+                        gap_days = (today_date.normalize() - pd.to_datetime(cell_state['date']).normalize()).days
+                        if gap_days > GAP_REINIT_DAYS:
+                            needs_bootstrap = True
+                            logger.info(f"{lat},{lon}: {gap_days}-day gap since last run, reinitializing from seasonal codes")
+
+                    if needs_bootstrap:
+                        if historical_data is None:
+                            historical_data = self.load_historical_weather(days_back=45)
+                            # Excluded once, up front -- see weather_file_date_str above.
+                            historical_data = historical_data[historical_data['file_date'] != weather_file_date_str]
+                        location_hist = historical_data[
+                            (historical_data['lat'] == lat) &
+                            (historical_data['lon'] == lon)
+                        ]
+                        ffmc, dmc, dc, recent = self.bootstrap_from_window(location_hist, today_date)
+                    else:
+                        ffmc, dmc, dc = cell_state['ffmc'], cell_state['dmc'], cell_state['dc']
+                        recent = cell_state.get('recent', [])
+
+                    ffmc, dmc, dc, recent, fwi_data = self.advance_one_day(ffmc, dmc, dc, recent, row, today_date)
+
                     # Validate FWI data
                     if any(np.isnan(v) or np.isinf(v) for v in [fwi_data.get('ffmc', 0), fwi_data.get('dmc', 0), fwi_data.get('dc', 0)]):
                         logger.warning(f"Invalid FWI data for {lat},{lon}, using defaults")
                         fwi_data = {
-                            'ffmc': 85.0, 'dmc': 6.0, 'dc': 15.0, 'isi': 1.0, 
+                            'ffmc': 85.0, 'dmc': 6.0, 'dc': 15.0, 'isi': 1.0,
                             'bui': 10.0, 'fwi': 5.0, 'dsr': 1.0
                         }
-                    
-                    # ML-based danger classification 
-                    today_date = pd.to_datetime(row.get('date', datetime.now().isoformat()))
+                        ffmc, dmc, dc = fwi_data['ffmc'], fwi_data['dmc'], fwi_data['dc']
 
-                    danger_class, risk_prob = self.get_ml_danger_class(
-                        lat=lat, lon=lon,
-                        ffmc=fwi_data['ffmc'], dmc=fwi_data['dmc'], dc=fwi_data['dc'],
-                        isi=fwi_data['isi'], bui=fwi_data['bui'], fwi=fwi_data['fwi'],
-                        date=today_date,
-                        historical_fire=row.get('historical_fire', 0),
-                        dc_trend_7d=fwi_data.get('dc_trend_7d', 0.0),
-                        bui_trend_7d=fwi_data.get('bui_trend_7d', 0.0),
-                    )
-                    color = DANGER_CLASS_COLORS[danger_class]
-                    adjusted_fwi = fwi_data['fwi'] 
+                    fwi_state[key] = {
+                        'ffmc': ffmc, 'dmc': dmc, 'dc': dc,
+                        'date': today_date.strftime('%Y-%m-%d'),
+                        'recent': recent,
+                    }
+
+                    # FWI-threshold danger classification (the ML layer is
+                    # parked -- see FireWeatherProcessor.__init__).
+                    danger_class, _, color = self.fwi_calculator.get_danger_class(fwi_data['fwi'])
+                    adjusted_fwi = fwi_data['fwi']
+
+                    # precip_24h_mm (Open-Meteo, a true 24h total) is
+                    # authoritative; fall back to summing the legacy
+                    # hourly/3h fields for files predating the collector
+                    # switch. Never mislabel a 24h total as an hourly one.
+                    precip_24h = self._num_or(row, 'precip_24h_mm', None)
+                    if precip_24h is None:
+                        precip_24h = (self._num_or(row, 'rain_1h_mm') + self._num_or(row, 'rain_3h_mm') +
+                            self._num_or(row, 'snow_1h_mm') + self._num_or(row, 'snow_3h_mm'))
                     
                     # Ensure FWI is valid
                     if np.isnan(adjusted_fwi) or np.isinf(adjusted_fwi):
@@ -589,18 +730,13 @@ class FireWeatherProcessor:
                             'humidity': row.get('humidity', 50),
                             'wind_speed': row.get('wind_speed', 10),
                             'pressure': row.get('pressure', 1013),
-                            'rain_1h_mm': row.get('rain_1h_mm', 0),
-                            'rain_3h_mm': row.get('rain_3h_mm', 0),
-                            'snow_1h_mm': row.get('snow_1h_mm', 0),
-                            'snow_3h_mm': row.get('snow_3h_mm', 0),
+                            'precip_24h_mm': precip_24h,  # true 24h accumulation, not an hourly snapshot
                             'is_hot': 1 if row.get('temperature', 15) > 25 else 0,
                             'is_dry': 1 if row.get('humidity', 50) < 30 else 0,
                             'humidity_temp_ratio': row.get('humidity', 50) / (row.get('temperature', 15) + 1),
                             'is_windy': 1 if row.get('wind_speed', 10) > 15 else 0,
-                            'total_precip': (row.get('rain_1h_mm', 0) + row.get('rain_3h_mm', 0) + 
-                                            row.get('snow_1h_mm', 0) + row.get('snow_3h_mm', 0)),
-                            'has_recent_precip': 1 if (row.get('rain_1h_mm', 0) + row.get('rain_3h_mm', 0) + 
-                                                       row.get('snow_1h_mm', 0) + row.get('snow_3h_mm', 0)) > 0 else 0,
+                            'total_precip': precip_24h,
+                            'has_recent_precip': 1 if precip_24h > 0 else 0,
                             'weather_main_encoded': 0
                         },
                         'fire_weather_indices': {
@@ -613,7 +749,6 @@ class FireWeatherProcessor:
                             'dsr': fwi_data['dsr']
                         },
                         'historical_fire_zone': bool(row.get('historical_fire', 0)),
-                        'model_confidence': risk_prob
                     }
                     
                     result = self.sanitize_dict_for_json(result_raw)
@@ -632,7 +767,10 @@ class FireWeatherProcessor:
             
             # Force garbage collection after each batch
             gc.collect()
-        
+
+        self.save_fwi_state(fwi_state)
+        logger.info(f"Persisted FWI state for {len(fwi_state)} cells to {FWI_STATE_FILE}")
+
         processing_time = (datetime.now() - start_time).total_seconds()
         
         # Calculate stats
@@ -669,7 +807,7 @@ class FireWeatherProcessor:
             'AB': (49.0, -120.0, 60.0, -110.0),
             'SK': (49.0, -110.0, 60.0, -101.4),
             'MB': (49.0, -102.0, 60.0, -88.9),
-            'ON': (41.7, -95.2, 56.9, -74.3),
+            'ON': (41.0, -95.2, 56.9, -74.3),  # extended from 41.7 -- the grid itself starts at 41.0
             'QC': (45.0, -79.8, 62.6, -57.1),
             'NB': (44.6, -69.1, 48.1, -63.7),
             'NS': (43.4, -66.4, 47.1, -59.7),
@@ -706,13 +844,13 @@ def main():
         "model_info": {
             "model_type": "Canadian Fire Weather Index System",
             "version": "2.1.0",
-            "methodology": "45-Day Historical Accumulation with Seasonal Initial Codes",
+            "fwi_standard": "FWI1987 (Van Wagner, 1987)",
+            "methodology": "Persisted daily FFMC/DMC/DC accumulation per cell, with seasonal "
+                            "reinitialization on first run or after a gap of more than "
+                            f"{GAP_REINIT_DAYS} days; falls back to replaying the 45-day weather "
+                            "window when no prior state exists for a cell.",
             "algorithm": "Pure CFWIS (Van Wagner, 1987) - No modifications to FWI output",
             "seasonal_approach": "Realistic initial fuel moisture codes based on seasonal weather patterns",
-            "r2_score": 0.95,
-            "mse": 0.001,
-            "mae": 0.01,
-            "fwi_range": [0, 100],
             "components": ["FFMC", "DMC", "DC", "ISI", "BUI", "FWI", "DSR"]
         },
         "processing_stats": processor.processing_stats,
@@ -720,54 +858,43 @@ def main():
         "last_updated": processing_timestamp,
         "fwi_calculated_at": processing_timestamp,  # When FWI was calculated
         "weather_last_updated": processing_timestamp,  # Same on initial calculation
-        "last_update_type": "full_fwi_calculation", 
+        "last_update_type": "full_fwi_calculation",
         "notes": {
             "fwi_interpretation": "FWI represents fire behavior potential (spread rate, intensity) if ignition occurs",
             "not_a_probability": "FWI does NOT predict the probability of a fire starting",
-            "danger_classes": "Official Canadian Forest Service danger classifications",
-            "historical_fire_adjustment": "Locations with past fires receive 15% FWI increase",
+            "danger_classes": "FWI1987 danger class thresholds; exact class boundaries vary by "
+                               "provincial/territorial fire agency",
             "update_schedule": "FWI: Daily at noon | Weather: Hourly"
         }
     }
-    
+
     #Sanitize the entire response
     api_response_sanitized = processor.sanitize_dict_for_json(api_response)
-    
+
     with open("fwi_predictions.json", "w") as f:
         json.dump(api_response_sanitized, f, indent=2)
-    
+
     # Save system components
     os.makedirs("model_components", exist_ok=True)
     joblib.dump(processor, "model_components/fire_risk_model.pkl")
-    
-    features = ['temperature', 'humidity', 'wind_speed', 'pressure', 'rain_1h_mm', 'rain_3h_mm', 'historical_fire']
-    joblib.dump(features, "model_components/model_features.pkl")
-    
-    from sklearn.preprocessing import LabelEncoder
-    dummy_encoder = LabelEncoder()
-    dummy_encoder.classes_ = np.array(['Clear', 'Clouds', 'Rain'])
-    joblib.dump(dummy_encoder, "model_components/weather_encoder.pkl")
-    
+
     system_info = {
         "model_type": "Canadian Fire Weather Index System",
-        "methodology": "45-Day Historical Accumulation with Seasonal Initial Codes",
+        "fwi_standard": "FWI1987 (Van Wagner, 1987)",
+        "methodology": "Persisted daily FFMC/DMC/DC accumulation per cell with seasonal reinitialization",
         "algorithm": "Pure CFWIS (Van Wagner, 1987)",
-        "r2_score": 0.95,
-        "mse": 0.001,
-        "mae": 0.01,
         "processing_stats": processor.processing_stats,
         "last_trained": processing_timestamp,
         "version": "FWI_2.1_Pure"
     }
-    
+
     with open("model_info.json", "w") as f:
         json.dump(system_info, f, indent=2)
     
     print("=" * 70)
     print("Pure Canadian Fire Weather Index System Ready!")
     print(f"✓ Processing completed at: {processing_timestamp}")
-    print(f"✓ Using 45 days of historical weather accumulation")
-    print(f"✓ Seasonal initial codes applied for {processor.fwi_calculator.get_seasonal_initial_codes(datetime.now().month)['season_name']}")
+    print(f"✓ Persisted daily FFMC/DMC/DC accumulation (seasonal reinit on gaps > {GAP_REINIT_DAYS} days)")
     print(f"✓ Processed {len(results)} locations successfully")
     print("=" * 70)
 
