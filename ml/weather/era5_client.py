@@ -70,12 +70,14 @@ def season_day_range(year: int, lead_in_days: int = 1):
     return days
 
 
-def _months_days(days):
-    """CDS wants separate month/day lists, not a date range -- group by month."""
-    by_month = {}
-    for d in days:
-        by_month.setdefault(f"{d.month:02d}", set()).add(f"{d.day:02d}")
-    return by_month
+def _date_strings(days):
+    """CDS's year/month/day list fields are independent and get cross-
+    producted (verified: requesting month=[03,04] and the day-of-month
+    union across those months pulls in every valid March-1..April-30 date,
+    not just the intended days -- harmless for the already-downloaded
+    2019-2023 files, since it only adds extra lead-in, but avoided going
+    forward with the "date" field, which takes explicit YYYY-MM-DD strings."""
+    return [d.isoformat() for d in days]
 
 
 def fetch_hourly(client: cdsapi.Client, year: int):
@@ -87,15 +89,12 @@ def fetch_hourly(client: cdsapi.Client, year: int):
         return out_path
 
     days = season_day_range(year, lead_in_days=0)
-    by_month = _months_days(days)
-    print(f"  Requesting hourly vars for {year}: {sum(len(v) for v in by_month.values())} days x "
+    print(f"  Requesting hourly vars for {year}: {len(days)} days x "
           f"{len(TARGET_UTC_HOURS)} hours x {len(HOURLY_VARIABLES)} vars")
 
     r = client.retrieve("reanalysis-era5-land", {
         "variable": HOURLY_VARIABLES,
-        "year": str(year),
-        "month": sorted(by_month.keys()),
-        "day": sorted({d for days_set in by_month.values() for d in days_set}),
+        "date": _date_strings(days),
         "time": [f"{h:02d}:00" for h in TARGET_UTC_HOURS],
         "area": AREA,
         "grid": GRID,
@@ -116,15 +115,11 @@ def fetch_precip(client: cdsapi.Client, year: int):
         return out_path
 
     days = season_day_range(year, lead_in_days=1)
-    by_month = _months_days(days)
-    n_days = sum(len(v) for v in by_month.values())
-    print(f"  Requesting precip for {year}: {n_days} days x 24 hours = {n_days * 24} fields")
+    print(f"  Requesting precip for {year}: {len(days)} days x 24 hours = {len(days) * 24} fields")
 
     r = client.retrieve("reanalysis-era5-land", {
         "variable": [PRECIP_VARIABLE],
-        "year": str(year),
-        "month": sorted(by_month.keys()),
-        "day": sorted({d for days_set in by_month.values() for d in days_set}),
+        "date": _date_strings(days),
         "time": [f"{h:02d}:00" for h in range(24)],
         "area": AREA,
         "grid": GRID,
