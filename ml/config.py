@@ -71,9 +71,13 @@ LABEL_WINDOWS_DAYS = [0, 1, 2]  # all three emitted as separate columns; label_w
 PRIMARY_LABEL_WINDOW = 2
 
 # ---- Stage 5/6/7: weather + replay + season window ----
-# CaSPAr HRDPS/GDPS archive, same model families as the live collector
-# (collect_weather_grid_eccc.py). 5 seasons: enough for the spatio-temporal
-# holdout (Stage 8) to mean something without an XL multi-decade pull.
+# ERA5-Land (see ml/weather/era5_client.py) -- CaSPAr was the original plan
+# (same model family as the live collector) but was unreachable for 10+
+# hours with no outage info, so this is a different provider than
+# collect_weather_grid_eccc.py's live HRDPS/GDPS/HRDPA; a residual,
+# measurable train/serve bias is expected. 5 seasons: enough for the
+# spatio-temporal holdout (Stage 8) to mean something without an XL
+# multi-decade pull.
 TRAINING_YEARS = [2019, 2020, 2021, 2022, 2023]
 HOLDOUT_YEAR = 2023  # most recent -- Stage 8's temporal regime holds this out entirely
 
