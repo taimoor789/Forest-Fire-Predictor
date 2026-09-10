@@ -41,7 +41,7 @@ def _unzipped_grib_path(zip_path: Path) -> Path:
     """era5_client.py's downloads are zip-wrapped regardless of the
     requested format (verified for both netcdf and grib) -- extract once,
     cache the extracted path alongside the zip."""
-    extract_dir = zip_path.with_suffix("")  # e.g. hourly_2019.grib -> hourly_2019/
+    extract_dir = zip_path.with_suffix("")  # e.g. hourly_2019_part0.grib -> hourly_2019_part0/
     extract_dir.mkdir(exist_ok=True)
     grib_path = extract_dir / "data.grib"
     if not grib_path.exists():
@@ -53,14 +53,25 @@ def _unzipped_grib_path(zip_path: Path) -> Path:
     return grib_path
 
 
+def _load_chunked(kind: str, year: int) -> xr.Dataset:
+    """era5_client.py splits each year's request into <=CHUNK_MAX_DAYS-day
+    chunks to stay under CDS's cost limit (a 289-day single request was
+    rejected outright; verified) -- load every part_N file for this
+    year/kind and concatenate along `time`, sorted, so the rest of the
+    adapter sees one continuous per-year dataset exactly as before."""
+    paths = sorted(RAW_DIR.glob(f"{kind}_{year}_part*.grib"))
+    if not paths:
+        raise FileNotFoundError(f"No {kind}_{year}_part*.grib files found in {RAW_DIR}")
+    datasets = [xr.open_dataset(_unzipped_grib_path(p), engine="cfgrib") for p in paths]
+    return xr.concat(datasets, dim="time").sortby("time")
+
+
 def load_hourly(year: int) -> xr.Dataset:
-    path = _unzipped_grib_path(RAW_DIR / f"hourly_{year}.grib")
-    return xr.open_dataset(path, engine="cfgrib")
+    return _load_chunked("hourly", year)
 
 
 def load_precip(year: int) -> xr.Dataset:
-    path = _unzipped_grib_path(RAW_DIR / f"precip_{year}.grib")
-    return xr.open_dataset(path, engine="cfgrib")
+    return _load_chunked("precip", year)
 
 
 def relative_humidity_pct(t2m_k, d2m_k):
