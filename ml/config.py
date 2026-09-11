@@ -46,6 +46,11 @@ SPATIAL_BLOCK_SIZE_DEG = 4.0
 SPATIAL_BLOCK_BUFFER_RING = 1  # exclude cells in blocks adjacent to a held-out
                                  # test block from training, to stop spatial
                                  # autocorrelation bleeding across the boundary
+N_SPATIAL_FOLDS = 5  # group-k-fold over block_id (ml/splits.py) -- fold 0 is
+                      # pre-registered as the spatio-temporal regime's test
+                      # set (Stage 11's deciding regime), fold 1 as the
+                      # Stage 10 calibration set. Fixed by SEED, never
+                      # re-rolled after seeing results.
 
 # ---- Stage 2: historical_fire ----
 # NRCan NFDB point archive (full history, not just the 2023 extract already
