@@ -164,7 +164,8 @@ def build():
     df = _add_province_dummies(df, all_provinces)
     print(f"{len(df)} rows, {len(all_provinces)} provinces: {all_provinces}")
 
-    folds = splits.spatial_folds(df["block_id"].unique())
+    block_positive_counts = splits.compute_block_positive_counts(df, TARGET_COL)
+    folds = splits.spatial_folds(df["block_id"].unique(), block_positive_counts=block_positive_counts)
 
     all_results = {}
 

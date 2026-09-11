@@ -118,9 +118,15 @@ DATA_DIR = REPO_ROOT / "data"
 REFERENCE_DIR = DATA_DIR / "reference"
 DOCS_DIR = REPO_ROOT / "docs"
 RESULTS_DIR = REPO_ROOT / "results"
-ARTIFACTS_DIR = REPO_ROOT / "artifacts"
+ARTIFACTS_DIR = REPO_ROOT / "artifacts"  # manifest.json only -- not for model binaries, see MODEL_COMPONENTS_DIR
 ARCHIVE_DIR = REPO_ROOT / "archive"
 MANIFEST_PATH = ARTIFACTS_DIR / "manifest.json"
+
+# Stage 10's trained model/calibrator/features/tiers live here -- same
+# (gitignored) directory as the quarantined pre-rebuild model, so Stage 12
+# can swap one for the other cleanly. docs/DATA_PROVENANCE.md, not git
+# history, is the durable record for anything under this directory.
+MODEL_COMPONENTS_DIR = REPO_ROOT / "model_components"
 
 GRID_DOMAIN_PATH = DATA_DIR / "grid_domain_v1.parquet"
 

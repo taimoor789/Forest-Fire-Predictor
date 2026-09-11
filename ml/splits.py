@@ -58,7 +58,15 @@ def _buffer_ring(test_blocks: set, all_blocks: set, ring: int = config.SPATIAL_B
     return buffer_blocks
 
 
-def spatial_folds(block_ids, k: int = config.N_SPATIAL_FOLDS, seed: int = config.SEED):
+def _raw_spatial_folds(block_ids, k: int, seed: int):
+    unique_blocks = np.array(sorted(set(block_ids)))
+    coords = np.array([_block_coords(b) for b in unique_blocks])
+    labels = KMeans(n_clusters=k, random_state=seed, n_init=10).fit_predict(coords)
+    return [set(unique_blocks[labels == i]) for i in range(k)], coords, unique_blocks
+
+
+def spatial_folds(block_ids, k: int = config.N_SPATIAL_FOLDS, seed: int = config.SEED,
+                    block_positive_counts: dict = None, min_fold_positives: int = 1000):
     """Assigns each unique block_id to one of k folds via KMeans on block
     centroid coordinates -- geographically CONTIGUOUS folds, not a random
     scatter. A random per-block assignment was tried first and rejected:
@@ -66,11 +74,57 @@ def spatial_folds(block_ids, k: int = config.N_SPATIAL_FOLDS, seed: int = config
     Canada), a random 20%-per-fold test set has a same-or-adjacent-fold
     neighbor almost everywhere, so the buffer ring (SPATIAL_BLOCK_BUFFER_RING)
     ended up excluding 63% of all rows from training -- verified directly.
-    Contiguous regions keep the buffer to just each region's boundary."""
-    unique_blocks = np.array(sorted(set(block_ids)))
-    coords = np.array([_block_coords(b) for b in unique_blocks])
-    labels = KMeans(n_clusters=k, random_state=seed, n_init=10).fit_predict(coords)
-    return [set(unique_blocks[labels == i]) for i in range(k)]
+    Contiguous regions keep the buffer to just each region's boundary.
+
+    `block_positive_counts`: pass {block_id: total positive-row count
+    across all years} to guard against a real failure mode found in this
+    project -- a purely geographic KMeans partition landed an entire fold
+    (33 blocks, 907K downstream rows) in the high Arctic tundra, which
+    structurally never burns, giving Stage 10's calibration split ZERO
+    positives and silently collapsing IsotonicRegression to a constant.
+    Any fold with fewer than min_fold_positives total positive rows has
+    its blocks reassigned to their nearest positive-containing fold by
+    centroid distance -- deterministic, based only on label counts (never
+    on any model's performance), so this can't become a way to p-hack
+    results after the fact. Omit `block_positive_counts` to get the raw,
+    unrepaired partition."""
+    folds, coords, unique_blocks = _raw_spatial_folds(block_ids, k, seed)
+    if block_positive_counts is None:
+        return folds
+
+    coord_by_block = dict(zip(unique_blocks, coords))
+    fold_positive_counts = [sum(block_positive_counts.get(b, 0) for b in f) for f in folds]
+
+    degenerate = [i for i, c in enumerate(fold_positive_counts) if c < min_fold_positives]
+    if not degenerate:
+        return folds
+
+    healthy = [i for i in range(k) if i not in degenerate]
+    assert healthy, "every spatial fold is degenerate -- min_fold_positives is too strict or data is broken"
+
+    for i in degenerate:
+        for block in list(folds[i]):
+            block_coord = coord_by_block[block]
+            # nearest HEALTHY fold by min distance to any of its member blocks
+            best_fold, best_dist = None, np.inf
+            for h in healthy:
+                fold_coords = np.array([coord_by_block[b] for b in folds[h]])
+                dist = np.linalg.norm(fold_coords - block_coord, axis=1).min()
+                if dist < best_dist:
+                    best_dist, best_fold = dist, h
+            folds[i].discard(block)
+            folds[best_fold].add(block)
+        print(f"  spatial_folds: fold {i} was degenerate ({fold_positive_counts[i]} positive rows total) "
+              f"-- its blocks were reassigned to nearest healthy folds")
+
+    return [f for f in folds if f]  # degenerate folds are now empty -- drop them
+
+
+def compute_block_positive_counts(df: pd.DataFrame, target_col: str = f"label_w{config.PRIMARY_LABEL_WINDOW}") -> dict:
+    """{block_id: total positive-row count across ALL years in df} -- feed
+    straight into spatial_folds' block_positive_counts to repair any
+    degenerate (zero-fire) fold before it's used anywhere."""
+    return df.groupby("block_id")[target_col].sum().to_dict()
 
 
 def temporal_split(df: pd.DataFrame):
@@ -116,8 +170,10 @@ def calibration_split(df: pd.DataFrame, folds):
 
 
 if __name__ == "__main__":
-    dataset = pd.read_parquet(config.DATA_DIR / "dataset_full.parquet", columns=["block_id", "year"])
-    folds = spatial_folds(dataset["block_id"].unique())
+    dataset = pd.read_parquet(config.DATA_DIR / "dataset_full.parquet",
+                                columns=["block_id", "year", f"label_w{config.PRIMARY_LABEL_WINDOW}"])
+    block_positive_counts = compute_block_positive_counts(dataset)
+    folds = spatial_folds(dataset["block_id"].unique(), block_positive_counts=block_positive_counts)
     print(f"{len(folds)} spatial folds, sizes: {[len(f) for f in folds]}")
 
     train_mask, test_mask = temporal_split(dataset)

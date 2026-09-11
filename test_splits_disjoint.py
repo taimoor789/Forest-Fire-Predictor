@@ -13,14 +13,31 @@ import pytest
 from ml import config, splits
 
 
+TARGET_COL = f"label_w{config.PRIMARY_LABEL_WINDOW}"
+
+
 @pytest.fixture(scope="module")
 def dataset():
-    return pd.read_parquet(config.DATA_DIR / "dataset_full.parquet", columns=["cell_id", "date", "block_id", "year"])
+    return pd.read_parquet(config.DATA_DIR / "dataset_full.parquet",
+                             columns=["cell_id", "date", "block_id", "year", TARGET_COL])
 
 
 @pytest.fixture(scope="module")
 def folds(dataset):
-    return splits.spatial_folds(dataset["block_id"].unique())
+    block_positive_counts = splits.compute_block_positive_counts(dataset, TARGET_COL)
+    return splits.spatial_folds(dataset["block_id"].unique(), block_positive_counts=block_positive_counts)
+
+
+def test_no_degenerate_fold(dataset, folds):
+    """Regression test: a purely geographic KMeans partition once landed an
+    entire fold (33 blocks) in the high Arctic tundra, which structurally
+    never burns -- 907,360 downstream rows with zero fire labels, which
+    silently collapsed Stage 10's IsotonicRegression calibrator to a
+    constant (verified: test PR-AUC dropped to exactly the base rate).
+    Every fold must have a real, non-trivial positive count."""
+    for i, f in enumerate(folds):
+        sub = dataset[dataset["block_id"].isin(f)]
+        assert sub[TARGET_COL].sum() >= 1000, f"fold {i} has too few positives ({sub[TARGET_COL].sum()})"
 
 
 def test_temporal_split_no_year_overlap(dataset):
