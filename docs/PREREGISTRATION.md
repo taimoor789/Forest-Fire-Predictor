@@ -1,0 +1,128 @@
+# Pre-Registration: ML Fire-Danger Model, Stage 11 Decision Gate
+
+Written and committed **before** Stage 9's evaluation harness has been run on
+real predictions — this document exists specifically so the ship/no-ship
+decision can't be quietly rationalized after seeing results. It is written
+once. Any later change is appended as a dated note below, never a silent
+edit to the numbers above it.
+
+## What's being decided
+
+Whether `get_ml_danger_class` (currently parked — see `fire_risk.py`'s
+`FireWeatherProcessor.__init__`) replaces `get_danger_class`'s FWI-threshold
+classification as what the live API serves. If the gate below isn't met,
+`get_danger_class` stays live exactly as it is today, the ML layer stays
+parked, and Stage 9's ablation is published as the honest standalone
+finding — a legitimate, valuable result in its own right, not a failure to
+paper over.
+
+## Framing claim
+
+The label (`ml/build_labels.py`) is 1 iff a fire was attributed within ±2
+days of a (cell, date). A forward half-window means a positive label can
+*precede* the fire it's paired with by up to 2 days. That is defensible
+under a **"fire danger"** reading — conditions were dangerous enough that a
+fire did start nearby within days — and is **not** defensible under a "fire
+detection" reading. This model claims the former. `label_w2` (±2 days) is
+pre-registered as primary; `label_w0`/`label_w1` are reported as sensitivity
+checks, not alternate primaries to pick from after the fact.
+
+## Primary metric
+
+**PR-AUC on the spatio-temporal holdout** (`ml.splits.spatio_temporal_split`
+— fold 0's held-out geographic region, combined with `HOLDOUT_YEAR`=2023),
+with a 95% block-bootstrap CI (bootstrapped over `block_id`, never over
+rows — rows within a block are spatially and temporally autocorrelated, and
+row-level bootstrap would understate the true uncertainty).
+
+PR-AUC, not ROC-AUC, is the headline: the positive rate is low (label_w2
+overall base rate 1.271% in the assembled dataset — see
+`docs/DATA_PROVENANCE.md`'s Stage 7 row), where PR-AUC is far more
+informative than ROC-AUC about whether the ranking is actually useful.
+
+Spatio-temporal is the **deciding** regime, not temporal or spatial alone —
+it's the only one of the three pre-registered regimes (`ml/splits.py`) that
+answers the question a deployed model actually faces: a new place, in a new
+season, neither seen in training.
+
+## Ship only if all four hold
+
+1. **Beats raw FWI.** The full model's PR-AUC exceeds baseline B1 (raw FWI
+   value as a ranking score) by at least
+   `config.GATE_MIN_RELATIVE_PR_AUC_LIFT_VS_RAW_FWI` = **25% relative**, and
+   the 95% CI lower bound of the *paired* PR-AUC difference (full model
+   minus B1, same test rows, same bootstrap resamples) is > 0.
+2. **Beats the live incumbent.** The full model beats baseline B2
+   (`get_danger_class` — literally what's shipping today) on both PR-AUC
+   and precision@top-5%. B2 is the actual bar to clear, not a nice-to-have
+   comparison: replacing a working system with a worse one is not a win
+   regardless of how it compares to a naive baseline.
+3. **Calibrated and monotone.** Calibration ECE ≤
+   `config.GATE_MAX_CALIBRATION_ECE` = **0.02** on the test split (measured
+   after probabilities are calibrated on the disjoint calibration split,
+   never on train or test). Out-of-sample tier fire rates (evaluated on the
+   untouched test split, using tier boundaries derived from the calibration
+   split) are **strictly monotone** — a non-monotone result is a fail
+   signal on its own, independent of every other metric, because it means
+   the tiers don't mean what they claim to mean.
+4. **The lift isn't just a reshaped FWI.** The ablation ladder (below) must
+   show the ≥25% lift is not attributable solely to rungs A1–A2 (nonlinear
+   functions of the same FWI codes already in production). If nearly all
+   the lift sits in A1→A2, the honest conclusion is that FWI already
+   captured what's available and a tree ensemble just re-expressed it —
+   informative, but not by itself a reason to add a whole new
+   training/serving/monitoring surface to the codebase.
+
+## Mandatory serving-safety gate (accuracy-independent)
+
+Every feature's live production distribution (from `fwi_predictions.json` /
+`data/fwi_state.json`) must have its **median** fall inside the training
+set's **5th–95th percentile range**. This check is independent of every
+accuracy metric above and **a model that fails it does not ship, regardless
+of test scores** — this is the direct, mechanical fix for the exact bug
+that invalidated the original model: its training DMC median was 500.0 (the
+saturation ceiling, 54.2% of rows pinned there) against live production's
+actual mean of 9.14. Good held-out accuracy metrics would never have caught
+that; only comparing distributions does.
+
+## Ablation ladder (pre-registered rungs, not chosen after seeing results)
+
+Identical hyperparameters, folds, and seed (`config.SEED`) throughout.
+
+| Rung | Adds | Tests |
+|---|---|---|
+| B0 | constant base rate | floor |
+| B1 | raw FWI value | current physics, no modelling |
+| B2 | `get_danger_class` tiers | **the live incumbent — the real bar** |
+| B3 | seasonality only (day_of_year, month) | pure calendar signal |
+| B4 | `historical_fire` only (leak-free) | pure ignition/fuel-proxy signal |
+| A1 | ffmc, dmc, dc, isi, bui, fwi | nonlinear function of FWI codes |
+| A2 | + dc_trend_7d, bui_trend_7d | still pure-FWI-derived |
+| A3 | + day_of_year, month | first genuinely new information |
+| A4 | + historical_fire (leak-free) | ignition/fuel proxy FWI can't see |
+| A5 | + province | spatial/administrative proxy |
+
+SHAP importance is computed at A5 and reported as an FWI-vs-added-information
+split, for direct comparison against the cited literature's ~54%/46% split
+(FWI-derived features vs. time-proxy features) in an analogous published
+wildfire-occurrence model.
+
+All metrics (PR-AUC, ROC-AUC, precision/recall@top-1%/@top-5%, Brier, ECE)
+are reported for every rung, on every split regime, both unweighted and
+area-weighted (`area_weight` from `ml/build_grid_domain.py`) — the ablation
+table itself is a primary deliverable of this rebuild regardless of whether
+the gate is met.
+
+## Context for interpreting the result
+
+Published regional wildfire-occurrence models typically report ROC-AUC in
+the 0.80–0.95 range. This project's coarse 0.5° cells and ±2-day label
+window make landing below that band plausible and would be informative
+about resolution/label-window limits, not by itself evidence of a broken
+model — noted here in advance specifically so it can't be used as an
+after-the-fact excuse in either direction.
+
+## Amendments
+
+None yet. Any future change to a number above this line is appended here
+with a date and reason, never edited in place.
