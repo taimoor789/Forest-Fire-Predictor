@@ -124,5 +124,41 @@ after-the-fact excuse in either direction.
 
 ## Amendments
 
-None yet. Any future change to a number above this line is appended here
-with a date and reason, never edited in place.
+**2026-09-11 — Stage 11 gate decision: SHIP.**
+
+Evaluated by `ml/stage11_gate.py` against the exact artifact that would
+ship (`model_components/model.pkl` + `calibrator.pkl` from Stage 10 —
+`rf_original`, selected by inner CV over folds untouched by test or
+calibration), on the pre-registered spatio-temporal test split. All four
+conditions plus the mandatory serving-safety gate pass:
+
+1. **Beats raw FWI (B1):** PR-AUC 0.1791 vs 0.0712 — paired diff 0.1080
+   (95% block-bootstrap CI 0.0829–0.1348, lower bound > 0), **151.7%
+   relative lift** (gate: ≥25%). PASS.
+2. **Beats the live incumbent (B2, `get_danger_class`):** PR-AUC 0.1791 vs
+   0.0633, precision@top-5% 0.2157 vs 0.0958 — beats on both. PASS.
+3. **Calibrated and monotone:** ECE 0.00995 on the untouched test split
+   (gate: ≤0.02); tier fire rates [0.0001, 0.0006, 0.0072, 0.0872] on the
+   test split, strictly monotone out-of-sample. PASS. (Note: only 4
+   tiers were derivable from the calibration split's quantiles, not the 6
+   `get_danger_class` uses — see `docs/DATA_PROVENANCE.md`'s Stage 10 row.
+   Unresolved design question for Stage 12, not a gate failure.)
+4. **Lift isn't just a reshaped FWI:** from Stage 9's ablation, rungs
+   A1→A2 (nonlinear functions of the same FWI codes, still no new
+   information) account for only 11.1% of the total A5-vs-B1 PR-AUC lift.
+   The dominant driver is `historical_fire` (A3→A4). PASS.
+5. **Serving-safety distribution gate:** every checked feature's live
+   production median falls inside `fit_train`'s 5th–95th percentile range
+   (`results/serving_safety_check.json`). PASS. `hist_fire_count_prior_20y_log1p`
+   and `years_since_last_fire` remain NOT YET CHECKABLE — no live
+   equivalent exists until `data/canada_fire_grid.csv` is regenerated
+   (Stage 12) — flagged as an open gap, not treated as a pass.
+
+Full numbers: `results/stage11_gate_decision.json`. This decision was made
+after the accuracy numbers above already existed — the pre-registration
+text itself (everything above this section) was written and committed
+(`87ca5db`) before Stage 9's ablation was ever run, which is what makes
+this a real gate rather than post-hoc rationalization.
+
+**Decision: proceed to Stage 12 (production wiring), shadow mode first,
+per the plan.**

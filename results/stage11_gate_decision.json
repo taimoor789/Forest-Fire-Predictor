@@ -1,0 +1,29 @@
+{
+  "condition_1_beats_b1": {
+    "pass": true,
+    "diff_point": 0.1079710173138632,
+    "diff_ci_lo": 0.08289342861400856,
+    "diff_ci_hi": 0.1347734480441534,
+    "relative_lift_pct": 151.71817516569686
+  },
+  "condition_2_beats_b2": {
+    "pass": true,
+    "full_pr_auc": 0.17913653007852978,
+    "b2_pr_auc": 0.06328655819045922,
+    "full_precision_top5pct": 0.21574911296783794,
+    "b2_precision_top5pct": 0.0957994735034909
+  },
+  "condition_3_calibrated_monotone": {
+    "pass": true,
+    "ece": 0.009952110643467986,
+    "monotone": true
+  },
+  "condition_4_not_just_fwi_reshaping": {
+    "pass": true,
+    "a1_a2_share_of_lift_pct": 11.139665832527399
+  },
+  "serving_safety_gate": {
+    "pass": true
+  },
+  "final_decision": "SHIP"
+}
