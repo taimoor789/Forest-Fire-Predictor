@@ -87,6 +87,26 @@ def wind_speed_kmh(u10, v10):
     return np.sqrt(u10 ** 2 + v10 ** 2) * 3.6  # m/s -> km/h
 
 
+def _dedupe_prefer_valid(times, values_2d):
+    """era5_client.py's per-year chunking (required to stay under CDS's cost
+    limit -- see era5_client.py's docstring) makes CDS auto-prepend one
+    boundary day to whichever chunk starts mid-accumulation, to supply that
+    chunk's first requested hour. That boundary date then appears in BOTH
+    chunks after concatenation, but each contributes only a PARTIAL view of
+    it (verified directly: one chunk has a valid step=16 reading and NaN at
+    step=24 for that date, the other has the reverse) -- a plain last-write-
+    wins dict from a duplicate key would silently pick the NaN half.
+
+    `values_2d` is (time, cell); NaN-aware groupby-mean over duplicate time
+    rows keeps whichever of the (at most two) values is real per cell,
+    since the other is NaN -- vectorized across all cells at once. Returns
+    {date: 1D array of per-cell values}.
+    """
+    df = pd.DataFrame(values_2d, index=pd.DatetimeIndex(times, name="time"))
+    deduped = df.groupby(level="time").mean()  # skipna by default -- NaN+real -> real
+    return {date: row.values for date, row in deduped.iterrows()}
+
+
 def extract_year(year: int, grid_domain: pd.DataFrame) -> pd.DataFrame:
     """One row per (cell_id, date) with temperature/humidity/wind_speed/
     pressure/precip_24h_mm in fire_risk.py's exact units. `grid_domain`
@@ -122,8 +142,8 @@ def extract_year(year: int, grid_domain: pd.DataFrame) -> pd.DataFrame:
         partial = p_sel["tp"].sel(step=step, method="nearest")                         # (time, cell)
 
         dates = pd.to_datetime(h["time"].values)
-        daily_total_by_date = dict(zip(pd.to_datetime(daily_total["time"].values), daily_total.values))
-        partial_by_date = dict(zip(pd.to_datetime(partial["time"].values), partial.values))
+        daily_total_by_date = _dedupe_prefer_valid(pd.to_datetime(daily_total["time"].values), daily_total.values)
+        partial_by_date = _dedupe_prefer_valid(pd.to_datetime(partial["time"].values), partial.values)
 
         precip_24h_mm = np.full((len(dates), len(group)), np.nan)
         for i, d in enumerate(dates):

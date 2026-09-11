@@ -76,5 +76,9 @@ def test_no_missing_rows(adapter_sample):
 
 
 def test_full_season_coverage_per_cell(adapter_sample):
+    # 75-day pre-season warmup (config.REPLAY_WARMUP_DAYS) + 214-day fire
+    # season (Apr 1 - Oct 31 inclusive) = 289 days, every one of them,
+    # per cell -- the adapter doesn't restrict to the season window itself,
+    # that's Stage 7's job (ml/build_dataset.py).
     counts = adapter_sample.groupby("cell_id").size()
-    assert (counts == 214).all()  # Apr 1 - Oct 31 inclusive
+    assert (counts == 289).all()
