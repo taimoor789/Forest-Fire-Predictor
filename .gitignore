@@ -4,6 +4,8 @@ config.json
 
 model_components/
 
+archive/
+
 weather_data/
 
 weather_data_archive_2025/

@@ -48,6 +48,15 @@ GRID_FILE = "data/canada_fire_grid.csv"
 OUTPUT_DIR = "weather_data"
 REQUEST_TIMEOUT = 90  # these are multi-MB whole-continent files
 
+# Stage 12 (ML rebuild): canada_fire_grid.csv now carries an `in_canada`
+# column from a real land mask (ml/build_grid_domain.py), vs. the coarse
+# province bounding boxes this grid was originally built from -- filtering
+# to it cuts the processed grid from 14,952 to 7,537 cells (the other 7,415
+# are ocean/US territory the old boxes let through). Filtered here, at read
+# time, rather than by physically shrinking the CSV, specifically so this
+# is reversible with one flag if the filter ever needs to be backed out.
+FILTER_TO_IN_CANADA = True
+
 # HRDPS's continental domain tops out at ~70.61N in practice (verified
 # against a real file). Cells at or below this use HRDPS/HRDPA; cells
 # above it fall back to GDPS. The grid's own 0.5-degree rows land exactly
@@ -377,7 +386,11 @@ def main():
         logger.info(f"{output_path} already exists for today; skipping fetch (use --force to refetch)")
         return 0
 
-    grid = pd.read_csv(GRID_FILE, usecols=["lat", "lon"])
+    grid = pd.read_csv(GRID_FILE, usecols=["lat", "lon", "in_canada"])
+    if FILTER_TO_IN_CANADA:
+        before = len(grid)
+        grid = grid[grid["in_canada"]].drop(columns=["in_canada"]).reset_index(drop=True)
+        logger.info(f"Filtered grid to in_canada cells: {before} -> {len(grid)}")
     grid["province"] = [get_province(r.lat, r.lon) for r in grid.itertuples()]
     grid["utc_offset"] = grid["province"].map(PROVINCE_UTC_OFFSET).fillna(PROVINCE_UTC_OFFSET["Unknown"])
     grid["in_hrdps_domain"] = grid["lat"] <= HRDPS_LAT_CUTOFF

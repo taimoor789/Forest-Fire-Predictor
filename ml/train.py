@@ -19,6 +19,12 @@ here). The
 selection rule (highest mean inner-CV PR-AUC) and the candidate grid are
 both fixed before running, not chosen after seeing results.
 
+features.json and tiers.json both carry the same run_id -- fire_risk.py
+checks they match at load time (a plain string comparison, no ml/ import
+needed at serve time, matching requirements-ml.txt's separation from the
+deploy-time requirements.txt) before trusting the pair. This is the direct
+fix for the original tier/model mismatch bug.
+
 Uses the exact same A5 feature set Stage 9 validated (docs/PREREGISTRATION.md)
 -- feature-derivation logic is intentionally duplicated from
 ml/build_ablation.py rather than imported, so touching this file can't
@@ -238,9 +244,11 @@ def build():
     joblib.dump(final_model, model_path)
     joblib.dump(calibrator, calibrator_path)
     with open(features_path, "w") as f:
-        json.dump({"feature_cols": feature_cols, "provinces": all_provinces, "model_type": best_name}, f, indent=2)
+        json.dump({"run_id": run_id, "feature_cols": feature_cols, "provinces": all_provinces,
+                     "model_type": best_name}, f, indent=2)
     with open(tiers_path, "w") as f:
         json.dump({
+            "run_id": run_id,
             "tier_names": tier_names,
             "tier_bounds": tier_bounds,
             "calibration_split_fire_rates": calib_tier_rates,

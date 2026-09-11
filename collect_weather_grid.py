@@ -189,7 +189,10 @@ def main():
         logger.info(f"{output_path} already exists for today; skipping fetch (use --force to refetch)")
         return 0
 
-    grid = pd.read_csv(GRID_FILE, usecols=["lat", "lon"])
+    grid = pd.read_csv(GRID_FILE, usecols=["lat", "lon", "in_canada"])
+    before = len(grid)
+    grid = grid[grid["in_canada"]].drop(columns=["in_canada"]).reset_index(drop=True)
+    logger.info(f"Filtered grid to in_canada cells: {before} -> {len(grid)}")
     logger.info(f"Fetching weather for {len(grid)} grid cells from Open-Meteo...")
 
     session = requests.Session()

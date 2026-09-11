@@ -11,10 +11,11 @@ A Python-based backend that processes weather data and calculates fire danger le
 The backend implements the **Canadian Fire Weather Index (FWI1987) System** (Van Wagner, 1987) — the standard fire weather index formulas used across Canadian wildfire agencies, though exact danger-class boundaries vary by provincial/territorial agency.
 
 ### **Key Capabilities**
-- 🌡️ **Gridded weather** for every cell individually, from Open-Meteo
-- 📍 **~15,000 grid cells** covering all of Canada (0.5° resolution)
+- 🌡️ **Gridded weather** for every cell individually, from ECCC's HRDPS/GDPS/HRDPA (Open-Meteo kept as a fallback)
+- 📍 **~7,500 grid cells** actually processed, filtered from a ~15,000-cell 0.5° grid down to real Canadian land (see `in_canada` in `data/canada_fire_grid.csv`)
 - 📈 **Persisted daily accumulation** per cell, with seasonal reinitialization on first run or after a data gap
 - 🎯 **FWI1987 algorithm** (FFMC, DMC, DC, ISI, BUI, FWI, DSR)
+- 🧪 **ML danger-tier model** (see `ml/` and `docs/PREREGISTRATION.md`) running in shadow mode — computed and logged alongside every prediction, not yet served
 - ⚠️ **Not currently scheduled** — see Deployment below
 
 ---
@@ -25,7 +26,7 @@ The backend implements the **Canadian Fire Weather Index (FWI1987) System** (Van
 |-----------|-----------|---------|
 | **API Framework** | FastAPI | High-performance REST API with automatic docs |
 | **Data Processing** | Pandas + NumPy | Efficient manipulation of weather/fire data |
-| **Weather API** | Open-Meteo | Gridded forecast weather, one pull per grid cell |
+| **Weather API** | ECCC (HRDPS/GDPS/HRDPA), Open-Meteo fallback | Gridded forecast weather, one pull per grid cell |
 | **FWI Algorithm** | Custom Implementation | FWI1987 (Van Wagner, 1987) formulas |
 | **Task Scheduling** | *(none currently — see Deployment)* | |
 | **Storage** | Local CSV + JSON | Weather history, persisted FWI state, cached predictions |
@@ -69,9 +70,9 @@ These are this system's own FWI1987 threshold boundaries (`get_danger_class()` i
 ## Data Sources
 
 ### **Weather Data**
-- **Provider:** Open-Meteo (gridded forecast API, pulled per grid cell)
+- **Provider:** ECCC HRDPS/GDPS/HRDPA (`collect_weather_grid_eccc.py`), with Open-Meteo (`collect_weather_grid.py`) kept as a fallback
 - **Frequency:** Once per day (see Deployment)
-- **Coverage:** All ~15,000 grid cells individually — no station interpolation
+- **Coverage:** ~7,500 grid cells actually in Canada (real land mask, see `in_canada` in `data/canada_fire_grid.csv`) — no station interpolation
 
 ### **Historical Fire Data**
 - **Source:** Natural Resources Canada - National Fire Database (NFDB)
@@ -95,7 +96,8 @@ The previous AWS Elastic Beanstalk deployment expired, so no scheduled cron curr
 - **Van Wagner, C.E.** - FWI System development (Van Wagner, 1987; Van Wagner & Pickett, 1985)
 - **Canadian Forest Service** - Fire weather research
 - **Natural Resources Canada** - National Fire Database
-- **Open-Meteo** - Weather API services
+- **Environment and Climate Change Canada (ECCC)** - HRDPS/GDPS/HRDPA weather data
+- **Open-Meteo** - Weather API fallback
 
 ---
 

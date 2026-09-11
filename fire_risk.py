@@ -349,13 +349,47 @@ class FireWeatherProcessor:
         self.fwi_calculator = CanadianFireWeatherIndex()
         self.processing_stats = {}
 
-        # The ML danger-classification layer (get_ml_danger_class below) is
-        # parked, not deleted: it was trained on leaked labels, saturated
-        # features, and buggy formulas (see the Phase 1 audit), so
-        # process_all_locations classifies with the FWI thresholds directly
-        # instead. Its model/schema/thresholds are intentionally not loaded
-        # here -- Phase 2 will need to retrain and reload them properly
-        # before this can be revived.
+        # ML layer (Stage 11 gate: SHIP, docs/PREREGISTRATION.md's Amendments
+        # section, 2026-09-11) -- loaded in SHADOW MODE only. process_all_
+        # locations still classifies danger_class/color_code with the FWI
+        # thresholds exclusively; the ML score is computed alongside and
+        # logged, never served, until a separate decision is made to flip
+        # after watching real agreement/disagreement for 2-4 weeks (Stage 12).
+        #
+        # Load is fail-safe by design: any missing file, schema mismatch, or
+        # exception here disables ML scoring for the whole run (self.ml_model
+        # stays None) rather than ever risking live FWI serving. This is also
+        # why fire_risk.py imports joblib directly instead of importing
+        # anything from ml/ -- requirements-ml.txt is deliberately kept out
+        # of the deploy-time requirements.txt, so the live path must stay
+        # buildable with only a fitted model + small JSON files, never
+        # geopandas/shapely/lightgbm/shap.
+        self.ml_model = None
+        self.ml_calibrator = None
+        self.ml_feature_cols = None
+        self.ml_tier_names = None
+        self.ml_tier_bounds = None
+        try:
+            with open("model_components/features.json") as f:
+                features_schema = json.load(f)
+            with open("model_components/tiers.json") as f:
+                tiers_schema = json.load(f)
+            if features_schema["run_id"] != tiers_schema["run_id"]:
+                raise ValueError(
+                    f"features.json run_id ({features_schema['run_id']}) != "
+                    f"tiers.json run_id ({tiers_schema['run_id']}) -- mismatched pair, "
+                    f"exactly the failure mode that invalidated the original tier thresholds"
+                )
+            self.ml_model = joblib.load("model_components/model.pkl")
+            self.ml_calibrator = joblib.load("model_components/calibrator.pkl")
+            self.ml_feature_cols = features_schema["feature_cols"]
+            self.ml_tier_names = tiers_schema["tier_names"]
+            self.ml_tier_bounds = tiers_schema["tier_bounds"]
+            logger.info(f"ML shadow scoring enabled: run_id={features_schema['run_id']}, "
+                        f"model={features_schema['model_type']}, {len(self.ml_tier_names)} tiers")
+        except Exception as e:
+            logger.warning(f"ML shadow scoring disabled (falling back to FWI-only): {e}")
+            self.ml_model = None
 
     def _cell_key(self, lat, lon):
         return f"{lat:.4f}_{lon:.4f}"
@@ -407,34 +441,45 @@ class FireWeatherProcessor:
             return int(data)
         return data
 
-    def get_ml_danger_class(self, lat, lon, ffmc, dmc, dc, isi, bui, fwi, date,     historical_fire, dc_trend_7d=0.0, bui_trend_7d=0.0):
-
-        province = self.get_province(lat, lon) 
+    def get_ml_danger_class(self, lat, lon, ffmc, dmc, dc, isi, bui, fwi, date,
+                              hist_fire_any_prior, hist_fire_count_prior_20y_log1p, years_since_last_fire,
+                              dc_trend_7d=0.0, bui_trend_7d=0.0):
+        """Stage 10's trained model (model_components/), matching
+        ml/train.py's exact A5 feature set and column order -- never a
+        re-derived subset. Returns (tier_name, calibrated_probability).
+        Caller must check self.ml_model is not None first (shadow mode
+        disables this entirely if the artifacts failed to load)."""
+        province = self.get_province(lat, lon)
         day_of_year = date.timetuple().tm_yday
         month = date.month
 
         row = {
             "ffmc": ffmc, "dmc": dmc, "dc": dc, "isi": isi, "bui": bui, "fwi": fwi,
-            "day_of_year": day_of_year, "month": month,
             "dc_trend_7d": dc_trend_7d, "bui_trend_7d": bui_trend_7d,
-            "historical_fire": historical_fire,
+            "day_of_year": day_of_year, "month": month,
+            "hist_fire_count_prior_20y_log1p": hist_fire_count_prior_20y_log1p,
+            "hist_fire_any_prior": hist_fire_any_prior,
+            "years_since_last_fire": years_since_last_fire,
         }
-        for prov_col in self.ml_feature_schema["province_dummy_columns"]:
-            row[prov_col] = 1 if prov_col == f"prov_{province}" else 0
+        for col in self.ml_feature_cols:
+            if col.startswith("prov_"):
+                row[col] = 1 if col == f"prov_{province}" else 0
 
-        X = pd.DataFrame([row])[self.ml_feature_schema["full_column_order"]]
+        X = pd.DataFrame([row])[self.ml_feature_cols]
         raw_score = self.ml_model.predict_proba(X)[0, 1]
+        calibrated_prob = float(self.ml_calibrator.predict([raw_score])[0])
 
-        bounds = self.ml_tier_thresholds["tier_bounds"]
-        names = self.ml_tier_thresholds["tier_names"]
-        fire_rates = self.ml_tier_thresholds["tier_actual_fire_rates"]
-
+        bounds = self.ml_tier_bounds
+        names = self.ml_tier_names
         # Half-open bins: [bounds[i], bounds[i+1]) so a score sitting exactly
-        # on a boundary lands in the tier above it, not the one below.
+        # on a boundary lands in the tier above it, not the one below. The
+        # last bin is an open-ended catch-all (bounds[-1] is a >1.0 cap, see
+        # ml/train.py's derive_tiers), so the loop deliberately stops one
+        # bin short and falls through to it for the top tier.
         for i in range(len(bounds) - 2):
-            if bounds[i] <= raw_score < bounds[i + 1]:
-                return names[i], fire_rates[i]
-        return names[-1], fire_rates[-1]
+            if bounds[i] <= calibrated_prob < bounds[i + 1]:
+                return names[i], calibrated_prob
+        return names[-1], calibrated_prob
         
     def load_historical_weather(self, days_back=45):  
         """Load historical weather data for FWI accumulation"""
@@ -628,14 +673,30 @@ class FireWeatherProcessor:
         # double-apply today's weather.
         weather_file_date_str = os.path.basename(weather_file).replace('.csv', '')
 
-        # Add historical fire context
+        # Add historical fire context. hist_fire_any_prior/_count_prior_20y_log1p/
+        # years_since_last_fire are the leak-free Stage 2 features the ML
+        # model actually trained on (ml/build_historical_fire.py); the plain
+        # `historical_fire` column is kept only for older non-ML consumers.
         try:
-            fire_df = pd.read_csv("data/canada_fire_grid.csv", usecols=['lat', 'lon', 'historical_fire'])
+            fire_df = pd.read_csv("data/canada_fire_grid.csv", usecols=[
+                'lat', 'lon', 'historical_fire',
+                'hist_fire_any_prior', 'hist_fire_count_prior_20y_log1p', 'years_since_last_fire',
+            ])
             today_data = today_data.merge(fire_df, on=['lat', 'lon'], how='left')
             today_data['historical_fire'] = today_data['historical_fire'].fillna(0).astype('int8')
-        except FileNotFoundError:
-            logger.warning("Historical fire data not found")
+            today_data['hist_fire_any_prior'] = today_data['hist_fire_any_prior'].fillna(0).astype('int8')
+            today_data['hist_fire_count_prior_20y_log1p'] = today_data['hist_fire_count_prior_20y_log1p'].fillna(0.0)
+            today_data['years_since_last_fire'] = today_data['years_since_last_fire'].fillna(0.0)
+        except (FileNotFoundError, ValueError) as e:
+            # ValueError covers an old-schema canada_fire_grid.csv missing
+            # the Stage 2 columns (data/ is gitignored -- a deploy target
+            # may still have the pre-Stage-12 file until it's regenerated
+            # there too). Fail open to FWI-only rather than crash serving.
+            logger.warning(f"Historical fire data unavailable or old schema ({e}); ML shadow scoring will be skipped")
             today_data['historical_fire'] = 0
+            today_data['hist_fire_any_prior'] = 0
+            today_data['hist_fire_count_prior_20y_log1p'] = 0.0
+            today_data['years_since_last_fire'] = 0.0
         
         results = []
         processing_errors = 0
@@ -697,10 +758,29 @@ class FireWeatherProcessor:
                         'recent': recent,
                     }
 
-                    # FWI-threshold danger classification (the ML layer is
-                    # parked -- see FireWeatherProcessor.__init__).
+                    # FWI-threshold danger classification -- this, not the
+                    # ML layer below, is what's actually served. See
+                    # FireWeatherProcessor.__init__ for the shadow-mode note.
                     danger_class, _, color = self.fwi_calculator.get_danger_class(fwi_data['fwi'])
                     adjusted_fwi = fwi_data['fwi']
+
+                    # Shadow-mode ML scoring: computed and logged, never
+                    # served. A failure here must never affect the FWI
+                    # result above -- caught and skipped per-cell, not
+                    # allowed to abort the whole run.
+                    ml_danger_class, ml_risk_probability = None, None
+                    if self.ml_model is not None:
+                        try:
+                            ml_danger_class, ml_risk_probability = self.get_ml_danger_class(
+                                lat, lon, fwi_data['ffmc'], fwi_data['dmc'], fwi_data['dc'],
+                                fwi_data['isi'], fwi_data['bui'], fwi_data['fwi'], today_date,
+                                self._num_or(row, 'hist_fire_any_prior'),
+                                self._num_or(row, 'hist_fire_count_prior_20y_log1p'),
+                                self._num_or(row, 'years_since_last_fire'),
+                                fwi_data.get('dc_trend_7d', 0.0), fwi_data.get('bui_trend_7d', 0.0),
+                            )
+                        except Exception as e:
+                            logger.warning(f"ML shadow scoring failed for {lat},{lon}: {e}")
 
                     # precip_24h_mm (Open-Meteo, a true 24h total) is
                     # authoritative; fall back to summing the legacy
@@ -725,6 +805,8 @@ class FireWeatherProcessor:
                         'fwi': adjusted_fwi,  # Fire Weather Index value (not percentage!)
                         'danger_class': danger_class,
                         'color_code': color,
+                        'ml_danger_class': ml_danger_class,  # shadow mode only -- not served, see __init__
+                        'ml_risk_probability': ml_risk_probability,
                         'weather_features': {
                             'temperature': row.get('temperature', 15),
                             'humidity': row.get('humidity', 50),
@@ -794,7 +876,29 @@ class FireWeatherProcessor:
                 'extreme_count': len([d for d in danger_classes if d == 'Extreme'])
             }
         }
-        
+
+        # Shadow-mode ML-vs-FWI comparison -- logged for the 2-4 week
+        # observation period (docs/PREREGISTRATION.md's Stage 12 shadow-mode
+        # note), never used to alter what's served. Agreement is capped
+        # below 100% structurally: the ML tier set currently has 4 tiers
+        # (see model_components/tiers.json), not FWI's 6, so a "Very High"/
+        # "Extreme" FWI call can never string-match an ML tier -- that's a
+        # real, expected disagreement, not a bug in this comparison.
+        if self.ml_model is not None:
+            scored = [r for r in results if r.get('ml_danger_class') is not None]
+            if scored:
+                agree = sum(1 for r in scored if r['ml_danger_class'] == r['danger_class'])
+                ml_classes = [r['ml_danger_class'] for r in scored]
+                self.processing_stats['ml_shadow'] = {
+                    'scored_count': len(scored),
+                    'agreement_rate': agree / len(scored),
+                    'ml_class_distribution': {c: ml_classes.count(c) for c in set(ml_classes)},
+                }
+                logger.info(f"ML shadow scoring: {len(scored)}/{len(results)} cells, "
+                            f"{agree}/{len(scored)} ({agree / len(scored) * 100:.1f}%) agree with FWI tier")
+            else:
+                logger.warning("ML shadow scoring was enabled but produced zero successful scores this run")
+
         logger.info(f"Processing complete: {len(results)} locations in {processing_time:.1f}s")
         logger.info(f"FWI: Min={min(fwi_values):.1f}, Max={max(fwi_values):.1f}, Mean={np.mean(fwi_values):.1f}")
         
