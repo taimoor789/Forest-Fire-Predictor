@@ -653,7 +653,14 @@ class FireWeatherProcessor:
         # Get today's data
         if weather_file is None:
             weather_files = glob.glob("weather_data/*.csv")
-            weather_file = max(weather_files, key=os.path.getctime)
+            if not weather_files:
+                raise FileNotFoundError("No weather data files found in weather_data/")
+            # Select by parsed filename (YYYY-MM-DD.csv), not os.path.getctime.
+            # In CI, every file in weather_data/ is materialized by a single
+            # `git checkout` -- all ctimes become the checkout time, not the
+            # data date -- so ctime-based selection can silently pick an
+            # arbitrary old file and then persist that as today's FWI state.
+            weather_file = max(weather_files, key=lambda p: os.path.basename(p))
         
         today_data = pd.read_csv(weather_file, dtype={
             'lat': 'float32',

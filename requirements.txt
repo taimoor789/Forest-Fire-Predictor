@@ -1,3 +1,8 @@
+# Daily pipeline dependencies (GitHub Actions: collect_weather_grid_eccc.py /
+# collect_weather_grid.py + fire_risk.py). NOT what Render installs to serve
+# the API -- see requirements-serve.txt for that much shorter list, since
+# main.py only ever reads pre-computed JSON off disk.
+
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 gunicorn==21.2.0
@@ -5,8 +10,10 @@ pandas==2.1.4
 numpy==1.26.4
 joblib==1.3.2
 requests==2.31.0
-scikit-learn==1.3.2
+# Must match the version model_components/model.pkl was actually fit under
+# (ml/train.py, Stage 10) -- a mismatch doesn't crash, it silently disables
+# ML shadow scoring via FireWeatherProcessor.__init__'s fail-safe try/except.
+scikit-learn==1.6.1
 python-multipart==0.0.6
-boto3==1.28.85
 eccodes==2.48.0
 scipy==1.13.1

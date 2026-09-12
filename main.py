@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 import joblib
@@ -218,17 +219,20 @@ async def health_check():
             # Calculate age in hours
             file_age = (datetime.now().timestamp() - os.path.getmtime(latest_file)) / 3600
             
-            if file_age < 2:  # Less than 2 hours old
+            # Thresholds match the daily (not hourly) pipeline cadence: a
+            # fresh run lands well under 26h since the last one, and 50h
+            # gives a full extra day of slack before calling it stale.
+            if file_age < 26:
                 components.append(ComponentHealth(
                     name="Weather Data",
                     status="healthy",
                     message=f"{len(weather_files)} files available, latest is {file_age:.1f}h old"
                 ))
-            elif file_age < 24:  # Less than 24 hours old
+            elif file_age < 50:
                 components.append(ComponentHealth(
                     name="Weather Data",
                     status="degraded",
-                    message=f"Latest data is {file_age:.1f}h old (expected <2h)"
+                    message=f"Latest data is {file_age:.1f}h old (expected <26h)"
                 ))
                 if overall_status == "healthy":
                     overall_status = "degraded"
@@ -254,13 +258,18 @@ async def health_check():
         ))
         overall_status = "unhealthy"
     
-    # 3. Check predictions file
+    # 3. Check predictions file -- size + mtime only, deliberately no
+    # json.load() here. At ~14.7MB, parsing the full file on every /health
+    # call (which Render polls repeatedly if configured as the health check
+    # path) is expensive on a 512MB/0.1-CPU free instance. Structural
+    # validation (does it parse, does it have the expected row count) runs
+    # once per day in the pipeline's own CI validation step instead -- see
+    # .github/workflows/daily-pipeline.yml.
     try:
         if os.path.exists("fwi_predictions.json"):
             file_size = os.path.getsize("fwi_predictions.json")
             file_age = (datetime.now().timestamp() - os.path.getmtime("fwi_predictions.json")) / 3600
-            
-            # Validate file size (too small indicates problem)
+
             if file_size < 1024:  # Less than 1KB is suspicious
                 components.append(ComponentHealth(
                     name="Predictions Cache",
@@ -268,17 +277,17 @@ async def health_check():
                     message=f"Predictions file suspiciously small ({file_size} bytes)"
                 ))
                 overall_status = "unhealthy"
-            elif file_age < 2:
+            elif file_age < 26:
                 components.append(ComponentHealth(
                     name="Predictions Cache",
                     status="healthy",
                     message=f"Predictions are {file_age:.1f}h old"
                 ))
-            elif file_age < 24:
+            elif file_age < 50:
                 components.append(ComponentHealth(
                     name="Predictions Cache",
                     status="degraded",
-                    message=f"Predictions are {file_age:.1f}h old (expected <2h)"
+                    message=f"Predictions are {file_age:.1f}h old (expected <26h)"
                 ))
                 if overall_status == "healthy":
                     overall_status = "degraded"
@@ -287,31 +296,6 @@ async def health_check():
                     name="Predictions Cache",
                     status="unhealthy",
                     message=f"Predictions are {file_age:.1f}h old (stale!)"
-                ))
-                overall_status = "unhealthy"
-            
-            # Validate JSON structure
-            try:
-                with open("fwi_predictions.json", "r") as f:
-                    pred_data = json.load(f)
-                if not pred_data.get("data"):
-                    components.append(ComponentHealth(
-                        name="Predictions Validation",
-                        status="unhealthy",
-                        message="Predictions file has no data"
-                    ))
-                    overall_status = "unhealthy"
-                else:
-                    components.append(ComponentHealth(
-                        name="Predictions Validation",
-                        status="healthy",
-                        message=f"{len(pred_data['data'])} predictions available"
-                    ))
-            except json.JSONDecodeError:
-                components.append(ComponentHealth(
-                    name="Predictions Validation",
-                    status="unhealthy",
-                    message="Predictions file is corrupted (invalid JSON)"
                 ))
                 overall_status = "unhealthy"
         else:
@@ -329,10 +313,15 @@ async def health_check():
         ))
         overall_status = "unhealthy"
     
-    # 4. Check model component files
+    # 4. Check required files. fire_risk_model.pkl (the old single-file
+    # model format) is gone -- the ML layer now loads model.pkl +
+    # calibrator.pkl + features.json + tiers.json in shadow mode (see
+    # FireWeatherProcessor.__init__), and a missing/mismatched ML artifact
+    # is fail-safe by design there, not something this health check needs
+    # to gate serving on. fwi_predictions.json is what's actually served.
     required_files = [
-        "model_components/fire_risk_model.pkl",
-        "model_info.json"
+        "model_info.json",
+        "fwi_predictions.json",
     ]
     
     missing_files = []
@@ -370,10 +359,10 @@ async def health_check():
             age_hours = (datetime.now(last_updated_dt.tzinfo or None) - last_updated_dt).total_seconds() / 3600
             
             data_freshness_status = DataFreshnessStatus(
-                is_fresh=age_hours < 2,
+                is_fresh=age_hours < 26,
                 age_hours=round(age_hours, 2),
                 last_updated=system_info_data["last_trained"],
-                status="fresh" if age_hours < 2 else ("stale" if age_hours < 24 else "very_stale")
+                status="fresh" if age_hours < 26 else ("stale" if age_hours < 50 else "very_stale")
             )
         except Exception:
             # Fallback if timestamp parsing fails
@@ -439,71 +428,57 @@ async def get_model_info():
 @app.get("/api/predict/fire-risk")
 async def get_fire_risk_predictions():
     """
-    Get fire risk predictions with validation. Loads cached predictions from JSON file and returns to frontend.
+    Get fire risk predictions. Serves the pre-computed predictions file
+    directly (FileResponse -- kernel sendfile, no parse/re-encode) rather
+    than loading it into a dict and re-serializing via JSONResponse: at
+    ~14.7MB, doing that per-request on a 512MB/0.1-CPU instance risked an
+    OOM under even light concurrency. Validation of the file's contents
+    happens once, in the daily pipeline's CI step, not on every request.
     """
     if not fire_weather_processor:
         raise HTTPException(
             status_code=503,
             detail="Fire Weather System not loaded"
         )
-    
-    try: 
-        # Load cached predictions
-        try:
-            with open("fwi_predictions.json", "r") as f:
-                cached_predictions = json.load(f)
-            
-            # Validate response structure
-            if not cached_predictions.get("success"):
-                raise ValueError("Invalid prediction data structure")
-            
-            if not cached_predictions.get("data"):
-                raise ValueError("No prediction data available")
-            
-            logger.info(f"Returning {len(cached_predictions['data'])} Fire Weather Index predictions")
-            
-            # Return response with cache-prevention headers
-            from fastapi.responses import JSONResponse
-            
-            return JSONResponse(
-                content=cached_predictions,
-                headers={
-                    "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
-                    "Pragma": "no-cache",
-                    "Expires": "0"
-                }
-            )
-            
-        except FileNotFoundError:
-            logger.error("No predictions available - fwi_predictions.json not found")
-            raise HTTPException(
-                status_code=404,
-                detail="No predictions available - run fire_risk.py first"
-            )
-        except json.JSONDecodeError as e:
-            logger.error(f"Corrupted predictions file: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail="Prediction data is corrupted"
-            )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Fire risk prediction failed: {str(e)}")
+
+    if not os.path.exists("fwi_predictions.json"):
+        logger.error("No predictions available - fwi_predictions.json not found")
         raise HTTPException(
-            status_code=500,
-            detail=f"Fire risk prediction failed: {str(e)}"
+            status_code=404,
+            detail="No predictions available - run fire_risk.py first"
         )
+
+    return FileResponse(
+        "fwi_predictions.json",
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
 
 @app.post("/api/system/retrain", response_model=SystemReloadResponse)
 async def retrain_system(request: Optional[RetrainRequest] = None):
-    """Trigger the data pipeline to refresh weather data and recalculate fire weather indices"""
-    
+    """Trigger the data pipeline to refresh weather data and recalculate fire weather indices.
+
+    Disabled by default (ENABLE_PIPELINE_ENDPOINTS). The daily pipeline now
+    runs in GitHub Actions (.github/workflows/daily-pipeline.yml), not via
+    this API -- this endpoint has no auth and would otherwise let anyone who
+    finds /docs spawn a subprocess with a 50-minute timeout on a free-tier
+    instance. Left in place only for local development.
+    """
+    if os.environ.get("ENABLE_PIPELINE_ENDPOINTS", "false").lower() != "true":
+        raise HTTPException(
+            status_code=503,
+            detail="Pipeline endpoints are disabled on this deployment. "
+                    "The data pipeline runs in GitHub Actions; see .github/workflows/daily-pipeline.yml",
+        )
+
     # Validate request (use defaults if None)
     if request is None:
         request = RetrainRequest()
-    
+
     try:
         logger.info("Triggering fire weather system refresh...")
         
@@ -566,10 +541,23 @@ async def retrain_system(request: Optional[RetrainRequest] = None):
 
 @app.post("/api/system/reload", response_model=SystemReloadResponse)
 async def reload_system():
-    """Reload the Fire Weather System components without refreshing weather data. Useful when predictions file is updated externally (by cron job)."""
-    try: 
+    """Reload the Fire Weather System components without refreshing weather data.
+
+    Disabled by default (ENABLE_PIPELINE_ENDPOINTS) and not actually useful
+    in the current deployment: fwi_predictions.json is read fresh from disk
+    on every request already (no in-memory cache to invalidate), and
+    model_components/fire_risk_model.pkl is the old single-file model
+    format, superseded by the model.pkl + calibrator.pkl pair loaded in
+    FireWeatherProcessor.__init__. Left in place only for local development.
+    """
+    if os.environ.get("ENABLE_PIPELINE_ENDPOINTS", "false").lower() != "true":
+        raise HTTPException(
+            status_code=503,
+            detail="Pipeline endpoints are disabled on this deployment.",
+        )
+    try:
         global fire_weather_processor, system_info_data
-        
+
         # Reload model components from disk
         fire_weather_processor = joblib.load("model_components/fire_risk_model.pkl")
         
@@ -644,5 +632,5 @@ async def get_danger_classes():
     }
 
 if __name__ == "__main__":
-    import uvicorn 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))

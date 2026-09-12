@@ -14,26 +14,22 @@ script_dir = Path(__file__).parent.absolute()
 os.chdir(script_dir)
 
 def run_script(script_name):
-    """Run a Python script and return True if successful, False if failed"""
+    """Run a Python script and return True if successful, False if failed.
+
+    stdout/stderr are inherited from the parent (not captured), so output
+    streams live -- a 20-minute ECCC pull otherwise shows nothing in a CI
+    log until it finishes and looks hung.
+    """
     try:
         print(f"Running {script_name}...")
-        # Runs another Python script (script_name) as a subprocess
-        result = subprocess.run(
-            [sys.executable, script_name],  # Command: run script_name using the same Python interpreter
-            capture_output=True,  # Captures stdout/stderr 
-            text=True,  # Returns output as strings (not bytes)
-            check=True  # Raises CalledProcessError if the subprocess fails
+        subprocess.run(
+            [sys.executable, "-u", script_name],
+            check=True,  # Raises CalledProcessError if the subprocess fails
         )
         print(f"{script_name} completed successfully")
-        if result.stdout:
-            print(f"Output: {result.stdout}")
         return True
     except subprocess.CalledProcessError as e:
         print(f"{script_name} failed with exit code {e.returncode}")
-        if e.stderr:
-            print(f"Error: {e.stderr}")
-        if e.stdout:
-            print(f"Output: {e.stdout}")
         return False
     except Exception as e:
         print(f"{script_name} failed with exception: {str(e)}")
@@ -67,31 +63,39 @@ def start_api_server():
         return None
 
 def run_data_pipeline():
-    """Run the Fire Weather Index data pipeline"""
-    # List of scripts to run in order
-    scripts = [
-        "collect_weather_grid.py",  # Get today's weather data
-        "fire_risk.py"              # Calculate Fire Weather Index predictions
-    ]
+    """Run the Fire Weather Index data pipeline.
 
-    failed_scripts = []
-    
-    # Run each script
-    for script in scripts:
-        if os.path.exists(script):
-            if not run_script(script):
-                failed_scripts.append(script)
-        else:
-            failed_scripts.append(f"{script} (file not found)")
-    
-    if len(failed_scripts) == 0:
-        print("Fire Weather Index data pipeline completed successfully!")
-        return True
-    else:
-        print("Fire Weather Index pipeline failed scripts:")
-        for script in failed_scripts:
-            print(f"  - {script}")
+    collect_weather_grid_eccc.py (ECCC HRDPS/GDPS/HRDPA) is the primary
+    weather collector; collect_weather_grid.py (Open-Meteo) is kept as a
+    fallback, used only if the primary fails outright -- matching the
+    "kept as fallback" intent already documented in that module's own
+    docstring. This function used to call the Open-Meteo collector
+    unconditionally, a leftover from before the ECCC migration.
+    """
+    collectors = ["collect_weather_grid_eccc.py", "collect_weather_grid.py"]
+
+    collected = None
+    for collector in collectors:
+        if not os.path.exists(collector):
+            print(f"{collector} not found, skipping")
+            continue
+        if run_script(collector):
+            collected = collector
+            break
+        print(f"{collector} failed; trying next collector")
+
+    if collected is None:
+        print("Fire Weather Index pipeline failed: no weather collector succeeded")
         return False
+    if collected != collectors[0]:
+        print(f"WARNING: fell back to {collected} (primary ECCC collector unavailable)")
+
+    if not run_script("fire_risk.py"):
+        print("Fire Weather Index pipeline failed: fire_risk.py")
+        return False
+
+    print("Fire Weather Index data pipeline completed successfully!")
+    return True
   
 def main():
     """Main function to run the complete Fire Weather Index system"""
