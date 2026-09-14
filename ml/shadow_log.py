@@ -154,6 +154,26 @@ def _run(args, log_dir, check=True):
     return subprocess.run(args, cwd=str(log_dir), capture_output=True, text=True, check=check)
 
 
+def _relative_to_log_dir(p, log_dir) -> str:
+    """Callers build paths via hotspots_dir(log_dir)/predictions_dir(log_dir),
+    which already include log_dir as a prefix (e.g. "shadow_eval_log/hotspots/x.csv").
+    But every git call here runs with cwd=log_dir, so passing that same
+    prefixed path back to git double-nests it ("shadow_eval_log/hotspots/
+    shadow_eval_log/hotspots/x.csv" from git's point of view) -- a real bug
+    that only surfaced in CI (where --log-dir is a relative path,
+    "shadow_eval_log") and not in local testing (where an absolute
+    --log-dir path made the double-prefix harmless by accident). Normalizing
+    here, once, makes commit_and_push correct regardless of whether the
+    caller's log_dir was relative or absolute."""
+    p = Path(p)
+    log_dir = Path(log_dir)
+    try:
+        return str(p.resolve().relative_to(log_dir.resolve()))
+    except ValueError:
+        # Already relative to log_dir (doesn't start with it) -- use as-is.
+        return str(p)
+
+
 def commit_and_push(log_dir, paths: list, message: str, max_retries: int = 5):
     """Fetch-rebase-retry push loop. Safe against the two workflows racing
     each other because they write disjoint subpaths (hotspots/ vs.
@@ -161,11 +181,13 @@ def commit_and_push(log_dir, paths: list, message: str, max_retries: int = 5):
     touches different files, so it always succeeds; this loop exists to
     handle the race, not to resolve real conflicts (there shouldn't be
     any)."""
+    rel_paths = [_relative_to_log_dir(p, log_dir) for p in paths]
+
     _run(["git", "config", "user.name", GIT_USER_NAME], log_dir)
     _run(["git", "config", "user.email", GIT_USER_EMAIL], log_dir)
 
     for attempt in range(1, max_retries + 1):
-        _run(["git", "add"] + [str(p) for p in paths], log_dir)
+        _run(["git", "add"] + rel_paths, log_dir)
         diff = _run(["git", "diff", "--cached", "--quiet"], log_dir, check=False)
         if diff.returncode == 0:
             print("shadow_log.commit_and_push: nothing to commit")
