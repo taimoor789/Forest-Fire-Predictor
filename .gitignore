@@ -1,0 +1,6 @@
+# This branch (shadow-eval-log) intentionally has no ignore rules of its
+# own beyond the OS/editor noise below -- everything under hotspots/,
+# predictions/, and grid_cells.csv is meant to be tracked and accumulate.
+.DS_Store
+__pycache__/
+*.pyc
