@@ -162,3 +162,105 @@ this a real gate rather than post-hoc rationalization.
 
 **Decision: proceed to Stage 12 (production wiring), shadow mode first,
 per the plan.**
+
+---
+
+**2026-09-14 — Pre-registering the live shadow-mode observation period,
+before it starts.**
+
+Stage 9-11's gate evaluated the model entirely on **ERA5-Land reanalysis
+weather** (CaSPAr, which would have matched the live weather provider, was
+unreachable for 10+ hours — see the Stage 5 row of `docs/DATA_PROVENANCE.md`).
+The live site feeds the model **ECCC HRDPS/GDPS/HRDPA** weather instead — a
+different provider the model has never been evaluated against. No
+historical backtest can answer whether this specific model behaves as
+expected under that provider switch; only observing it run for real can.
+This is that observation period's pre-registered design, written before the
+first data point exists.
+
+**This is a tripwire, not a rigorous accuracy comparison, and is being
+run and interpreted as one.** Verified before writing this: CWFIS satellite
+hotspot detections (the only near-real-time Canadian fire-occurrence source
+available — NFDB, used for training, has real reporting lag and is not
+usable here) run at roughly 35 Canadian-agency detections/day at this point
+in the season, clustering into an estimated 20-40 distinct fire complexes
+over a week. That sample size supports detecting gross breakage (e.g.
+recall around 0.6 vs 0.1) and does not support detecting a difference like
+"55% vs 45%" — margins are roughly ±18 percentage points. Framing this as a
+precise comparison would misrepresent what a sample this size can say.
+
+**Primary check — needs no fires at all, available from day one, highest
+statistical power (n=7,537/day):** every day, the live ECCC-derived feature
+distribution is compared against the ERA5-trained `train_p5`-`train_p95`
+bands already committed in `results/serving_safety_check.json`. This is the
+most direct available measurement of "does the model see the distribution
+it was trained on, now that it's fed a different provider."
+
+**Secondary check — real fire occurrence, explicitly low-power:** each
+day's `danger_class`/`ml_danger_class`/`ml_risk_probability` snapshot is
+compared against CWFIS hotspots attributed to cells within the following
+days, using **`ml.attribution.assign_nearest_cell`** (Stage 2/3's own
+nearest-cell join, not a second independently-defined "is this in Canada"
+check) at `config.GROUND_TRUTH_MAX_ATTRIBUTION_KM`.
+
+- **Forward window: {0, +1, +2} days, W=+1 primary.** The historical labels
+  are symmetric ±2; this is the forward-only analogue, since the log starts
+  empty with no prior days to look back on. **W=0 is reported separately and
+  labelled "concurrent," not "forward"** — the prediction snapshot and the
+  hotspot pull aren't far enough apart in time for a same-day match to be
+  genuinely predictive rather than contemporaneous.
+- **Ranking is within-day**, then pooled — never a global cross-week
+  ranking, which would let one hot day monopolize the top-k and end up
+  measuring weather variance instead of model skill.
+- **Reused:** `ml.evaluate.precision_recall_at_k` for matched-area
+  recall@{1%, 5%, 10%}, reported as lift (recall ÷ k) — self-interpreting
+  and the best available signal-to-noise ratio at this sample size.
+- **Deliberately NOT reused, and why:** `block_bootstrap_ci` /
+  `paired_block_bootstrap_diff` — of the ~120 spatial blocks, only 5-15
+  will carry any positive in one week; resampling would frequently draw
+  zero-positive resamples, which the function's `except ValueError:
+  continue` silently drops, biasing the surviving distribution toward the
+  lucky draws and producing a confidently-wrong tight CI. `expected_
+  calibration_error` / Brier — hotspot detection is a different modality
+  at a different base rate than the NFDB ±2-day label the model was
+  actually calibrated against; a large ECE here would reflect that
+  mismatch, not ECCC-vs-ERA5 drift, and would be misread as a problem that
+  doesn't exist. Area weighting — `area_weight` requires
+  `grid_domain_v1.parquet`, which is not tracked in git and unavailable in
+  CI; the grid used here is instead derived fresh from each day's served
+  `fwi_predictions.json`, which does not carry that column. This deviates
+  from Stage 9's "both unweighted and area-weighted" convention; the
+  deviation is deliberate, not an oversight.
+- **Minimum-positives rule:** fewer than **N_MIN = 50** distinct (cell,
+  detection-day) positives by the evaluation point means the result is
+  **INCONCLUSIVE**, not a pass — the window extends until N_MIN is reached
+  or a hard stop of 2026-10-15, whichever comes first. Below N_MIN even the
+  tripwire framing is too weak to trust (recall SE would exceed ±14pp).
+- **Days with a failed/suspect CWFIS pull are excluded from the
+  denominator entirely, never scored as zero positives** — an
+  indistinguishable-from-a-quiet-day failure would bias every recall number
+  downward and look exactly like model drift.
+
+**Pre-committed tripwire conditions:**
+
+| # | Condition | On failure |
+|---|---|---|
+| T1 (primary) | Every checked feature's live median stays inside its `train_p5`-`train_p95` band on ≥6 of 7 evaluated days | Investigate provider drift; do not promote |
+| T2 | Realized positive rates across the 4 ML tiers are non-decreasing (ties permitted in the two lowest) | Do not promote |
+| T3 | Daily ML tier shares stay within a pre-committed band; no tier collapses to ~0% or exceeds ~40% | Do not promote |
+| T4 | ML's recall@top-5% (matched-area) is not below 0.7× the incumbent FWI system's | Extend, don't decide |
+| T5 | ML's top-5% captures more positives than a random 5% would (lift > 1) | Extend, don't decide |
+
+**Decision mapping:** all five pass → promote ML to primary (a separate,
+subsequent decision on how the frontend/backend actually switch, not
+automatic). T1 fails → investigate before doing anything else. T2 or T3
+fail → do not promote. T4 or T5 fail → extend the window rather than
+deciding on insufficient evidence. Fewer than N_MIN positives at the
+evaluation point → INCONCLUSIVE, extend.
+
+Implementation: `ml/cwfis_hotspots.py`, `ml/shadow_snapshot.py`,
+`ml/shadow_report.py`, running against a dedicated `shadow-eval-log` git
+branch, isolated from the production `daily-pipeline.yml`/`deploy` path so
+a failure here can never affect live serving. Full design rationale in the
+session record; this amendment is the durable, committed version of the
+gate itself.
