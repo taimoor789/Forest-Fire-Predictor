@@ -1,0 +1,78 @@
+name: Shadow eval - CWFIS hotspot capture
+
+on:
+  # Three overlapping 24h windows. The feed is a ROLLING 24h with no
+  # archive: any window not captured is permanently lost. One pull/day has
+  # near-zero tolerance for GitHub's scheduling jitter (daily-pipeline.yml's
+  # own comments note runs at :00 are routinely delayed or dropped); three
+  # 8h-spaced pulls need a 16h continuous outage before any data is lost.
+  # Offset from :00 for the same jitter reason.
+  schedule:
+    - cron: "17 2 * * *"
+    - cron: "17 10 * * *"
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # Same string as shadow-eval-snapshot.yml on purpose: concurrency groups
+  # are repo-wide by name, so this serializes the two workflows against
+  # each other. The push-retry loop in ml/shadow_log.py (fetch + rebase +
+  # retry) is the actual correctness guarantee -- safe because the two
+  # workflows write disjoint subpaths (hotspots/ vs predictions/), so a
+  # rebase here can never hit a real conflict. This concurrency group is
+  # just the optimization that stops it from ever having to work hard.
+  group: shadow-eval-log-writer
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out code from main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Check out the accumulating shadow-eval log
+        uses: actions/checkout@v4
+        with:
+          ref: shadow-eval-log
+          path: shadow_eval_log
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-shadow-eval.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-shadow-eval.txt
+
+      - name: Fetch, validate and attribute CWFIS hotspots
+        # No continue-on-error. A failed fetch must go red: the source has
+        # no backfill, so a silent skip is unrecoverable data loss. Going
+        # red while two more pulls remain today means a manual dispatch can
+        # still recover it (per docs/PREREGISTRATION.md's exclusion rule:
+        # failed pulls are excluded from the analysis denominator, never
+        # scored as a real zero).
+        run: python -u -m ml.cwfis_hotspots --log-dir shadow_eval_log
+
+      - name: Redundant copy as a run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hotspots-${{ github.run_id }}
+          path: shadow_eval_log/hotspots/
+          retention-days: 90
+          if-no-files-found: warn
