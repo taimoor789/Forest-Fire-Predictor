@@ -15,8 +15,29 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))  # so `import fire_risk` / `collect_weather_grid_eccc` work from ml/ scripts
 
-from fire_risk import GAP_REINIT_DAYS, TREND_HISTORY_DAYS          # noqa: E402
-from collect_weather_grid_eccc import HRDPS_LAT_CUTOFF              # noqa: E402
+# Deferred via module __getattr__ (PEP 562), not an eager import.
+# collect_weather_grid_eccc.py imports eccodes at module level (real GRIB
+# decoding for the live pipeline); ml.cwfis_hotspots separately loads
+# geopandas/pyproj via ml.attribution, and the two native stacks landing in
+# one process crashed with std::bad_alloc in CI (2026-09-18 onward -- see the
+# 2026-09-21 PREREGISTRATION.md amendment).
+# Most ml/ scripts never touch these three constants, so importing their
+# source modules eagerly cost every script that risk for no reason. Any
+# caller that does access them still gets the real, single source-of-truth
+# value -- the import just happens on first use instead of on import.
+_LAZY_SOURCE_CONSTANTS = {
+    "GAP_REINIT_DAYS": ("fire_risk", "GAP_REINIT_DAYS"),
+    "TREND_HISTORY_DAYS": ("fire_risk", "TREND_HISTORY_DAYS"),
+    "HRDPS_LAT_CUTOFF": ("collect_weather_grid_eccc", "HRDPS_LAT_CUTOFF"),
+}
+
+
+def __getattr__(name):
+    if name in _LAZY_SOURCE_CONSTANTS:
+        import importlib
+        module_name, attr_name = _LAZY_SOURCE_CONSTANTS[name]
+        return getattr(importlib.import_module(module_name), attr_name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # ---- Reproducibility ----
 SEED = 42  # matches scripts/train_final_model.py's original random_state,
