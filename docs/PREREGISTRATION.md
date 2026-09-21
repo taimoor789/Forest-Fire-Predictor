@@ -264,3 +264,46 @@ branch, isolated from the production `daily-pipeline.yml`/`deploy` path so
 a failure here can never affect live serving. Full design rationale in the
 session record; this amendment is the durable, committed version of the
 gate itself.
+
+**2026-09-21 — CWFIS capture outage, root cause, and evaluation-window
+impact.**
+
+`shadow-eval-hotspots.yml`'s scheduled runs crashed on every attempt from
+2026-09-18 ~20:58 UTC through 2026-09-21 ~16:29 UTC (8 consecutive
+failures) with `std::bad_alloc` — a native out-of-memory abort, not a
+Python exception. Root cause: `ml/config.py` eagerly imported
+`HRDPS_LAT_CUTOFF` from `collect_weather_grid_eccc.py` (which imports
+`eccodes` at module level for GRIB decoding) on behalf of every `ml/`
+script, including `ml.cwfis_hotspots`, which never uses that constant.
+`ml.cwfis_hotspots` separately loads `geopandas`/`pyproj` via
+`ml.attribution`. Loading both native geospatial stacks in one process is
+what crashed — `daily-pipeline.yml` never hits this because it never loads
+`geopandas` alongside `eccodes`. Fixed by making `ml/config.py`'s
+`GAP_REINIT_DAYS`/`TREND_HISTORY_DAYS`/`HRDPS_LAT_CUTOFF` lazy (PEP 562
+module `__getattr__`) instead of eager imports; verified locally (confirmed
+`eccodes` no longer enters `sys.modules` when importing `ml.cwfis_hotspots`,
+confirmed the lazy constants still resolve correctly when a caller that
+does need them accesses them) and against the live CWFIS endpoint, which
+pushed a real capture (`20260921T182200Z`, 551 attributed hotspots) to
+`shadow-eval-log`.
+
+Because CWFIS's `hotspots_last24hrs` feed has no backfill, the fire
+detections that would have been captured 2026-09-19 and 2026-09-20, and
+most of 2026-09-18 evening onward through 2026-09-21 daytime, are
+permanently unrecoverable — this is a real, not merely cosmetic, gap in
+the ground-truth half of this check. The prediction-snapshot side
+(`shadow-eval-snapshot.yml`) was unaffected and has a complete, unbroken
+daily record for 2026-09-14 through 2026-09-20.
+
+Impact on the pre-registered decision: T1 (the serving-safety distribution
+tripwire) does not depend on hotspot data at all and is unaffected. The
+fire-occurrence tripwires (T2-T5) lose forward-window label completeness
+for prediction snapshots whose +1/+2-day window falls inside the gap
+(2026-09-17 onward) — `ml/shadow_report.py`'s existing censoring logic
+(excluding failed/absent-pull days from the denominator, never scoring them
+as zero positives) handles this correctly without further changes, but it
+narrows the fully-evaluable window to 2026-09-14 through roughly
+2026-09-16. Hotspot capture resumed 2026-09-21; per the pre-registered
+N_MIN=50 rule and 2026-10-15 hard stop, the window is extended rather than
+evaluated on the narrower pre-gap data alone if N_MIN is not yet reached
+on the clean days.
