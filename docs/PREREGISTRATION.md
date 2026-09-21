@@ -307,3 +307,46 @@ narrows the fully-evaluable window to 2026-09-14 through roughly
 N_MIN=50 rule and 2026-10-15 hard stop, the window is extended rather than
 evaluated on the narrower pre-gap data alone if N_MIN is not yet reached
 on the clean days.
+
+**2026-09-21 — First evaluation: T2 fails, do not promote.**
+
+`ml/shadow_report.py` run against the 5 fully-evaluable days
+(2026-09-14 through 2026-09-18; 2026-09-19/20 excluded as forward-window
+censored, per design). 219 distinct (cell, day) positives at the primary
+W1 window — N_MIN=50 cleared, this is a real evaluation, not INCONCLUSIVE.
+
+- **T1 (serving-safety):** PASS — 5/5 evaluated days in-band (threshold
+  scaled from the pre-registered 6/7 rule for a shorter window, as
+  designed).
+- **T2 (tier monotonicity):** **FAIL.** Realized fire rates by ML tier:
+  Very Low 0.0013, Low 0.0056, **Moderate 0.0051**, High 0.0237 — Low
+  and Moderate are inverted, outside the "ties permitted in the two
+  lowest" allowance (that covers Very Low/Low, not Low/Moderate).
+- **T3 (tier-share stability):** PASS — checked directly against the 7
+  daily snapshot meta.json tier histograms (not the pooled, fire-
+  occurrence-conditioned table, which isn't the right basis for this
+  check): all four tiers stayed within a stable, non-degenerate range
+  across all 7 days (Very Low 41.5-44.0%, Moderate 24.0-26.7%, Low
+  17.8-20.5%, High 11.1-14.4%) — no collapse, no runaway growth.
+- **T4 (recall@top-5% vs. 0.7x FWI):** PASS — ML 0.356 vs. FWI 0.196
+  (ML exceeds FWI outright, well clear of the 0.7x floor).
+- **T5 (lift@top-5% > 1.0):** PASS — 7.12x.
+
+**Decision mapping applies exactly as pre-registered: T2 fail → do not
+promote.** Not treated as noise-adjustable or waved through — the Low/
+Moderate gap (41 positives/7,299 cells vs. 49/9,642 cells) is small and
+plausibly sampling noise at this sample size, but the whole point of
+pre-registering T2 as a strict, un-negotiable check was to not make that
+judgment call after seeing the result. The 4-tier boundaries were derived
+from ERA5 calibration-split quantiles (Stage 10) and have never been
+validated against ECCC-fed live data until this check — a Low/Moderate
+boundary that doesn't hold up live is exactly the kind of thing this
+system exists to catch, not explain away.
+
+**Path forward:** not a kill decision — shadow logging continues (now
+healthy again after the 2026-09-21 fix above) and this check reruns as
+more data accumulates. If the inversion persists with a larger sample, it
+points at the tier-boundary derivation, not the underlying model; if it
+resolves, this was sampling noise at n=5 days. Next re-evaluation once
+enough clean days have accumulated past the outage window, hard stop
+2026-10-15 regardless.
