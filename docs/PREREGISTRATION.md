@@ -350,3 +350,26 @@ points at the tier-boundary derivation, not the underlying model; if it
 resolves, this was sampling noise at n=5 days. Next re-evaluation once
 enough clean days have accumulated past the outage window, hard stop
 2026-10-15 regardless.
+
+**2026-09-28 — Second evaluation: all five tripwires pass.**
+
+`ml/shadow_report.py` run against 10 evaluable days (2026-09-14 through
+2026-09-25, excluding 2026-09-19/20 for the outage and 2026-09-26/27 as
+forward-window censored). 603 distinct (cell, day) positives at W1.
+
+- **T1:** PASS — 10/10 days in-band.
+- **T2:** PASS — realized rates now strictly increasing (Very Low 0.10%,
+  Low 0.75%, Moderate 0.97%, High 2.77%). The 2026-09-21 Low/Moderate
+  inversion (0.56% vs. 0.51% on 41/49 positives) resolved as more data
+  accumulated — consistent with that having been sampling noise, not a
+  real tier-boundary problem, as flagged at the time.
+- **T3:** PASS — checked against all 14 daily snapshot tier histograms;
+  all four ML tiers stayed stable and non-degenerate throughout (Very Low
+  41.5-45.3%, Moderate 23.1-28.4%, Low 12.9-20.5%, High 11.1-15.7%).
+- **T4:** PASS — ML recall@top-5% 0.294 vs. FWI 0.189 (ML ahead outright).
+- **T5:** PASS — lift@top-5% 5.87x.
+
+**Decision: promote.** Per the pre-registered mapping, all five passing
+means the ML model is cleared for promotion to primary. The actual
+frontend/backend switch-over is, as pre-registered, a separate decision —
+not executed by this amendment alone.
