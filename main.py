@@ -611,22 +611,77 @@ async def get_system_stats():
         logger.error(f"Error getting system stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve system statistics")
 
+FWI_DANGER_CLASSES = [
+    {"name": "Very Low", "range": "0-2 FWI", "color": "#4CAF50", "description": "Fires start easily but spread slowly"},
+    {"name": "Low", "range": "2-4 FWI", "color": "#8BC34A", "description": "Fires start easily and spread at low to moderate rates"},
+    {"name": "Moderate", "range": "4-8 FWI", "color": "#FFEB3B", "description": "Fires start easily and spread at moderate rates"},
+    {"name": "High", "range": "8-18 FWI", "color": "#FF9800", "description": "Fires start easily and spread at high rates"},
+    {"name": "Very High", "range": "18-30 FWI", "color": "#F44336", "description": "Fires start very easily and spread at very high rates"},
+    {"name": "Extreme", "range": "30+ FWI", "color": "#9C27B0", "description": "Fires start very easily and spread at extreme rates"}
+]
+
+# Plain-language descriptions for the ML tiers -- these represent calibrated
+# probability of fire occurrence (weather + historical fire proximity), not
+# FWI's fire-behavior-potential framing, so reusing FWI's own descriptions
+# here would misstate what these tiers actually mean.
+ML_TIER_DESCRIPTIONS = {
+    "Very Low": "Current conditions and fire history indicate a very low chance of a fire starting nearby",
+    "Low": "Current conditions and fire history indicate a low chance of a fire starting nearby",
+    "Moderate": "Current conditions and fire history indicate a moderate chance of a fire starting nearby",
+    "High": "Current conditions and fire history indicate an elevated chance of a fire starting nearby",
+}
+
+
+def _get_ml_danger_classes():
+    """Reads model_components/tiers.json at request time rather than
+    hardcoding the bounds here, so a retrained model's tiers flow through
+    automatically -- same reasoning ml/config.py applies to its own
+    fire_risk.py-sourced constants. Falls back to None (caller uses FWI's
+    classes) if the file is missing, matching this codebase's existing
+    fail-safe-to-FWI pattern rather than ever erroring the endpoint."""
+    try:
+        with open("model_components/tiers.json") as f:
+            tiers = json.load(f)
+        names = tiers["tier_names"]
+        bounds = tiers["tier_bounds"]
+        classes = []
+        for i, name in enumerate(names):
+            # Raw fractions, no "%" -- the frontend's parseRange() strips a
+            # literal "fwi" substring but otherwise treats the string as an
+            # already-unitless number, so a "%"-suffixed string here would
+            # silently round-trip as if it were 100x too large. Formatting
+            # as a percentage is the frontend's job at display time.
+            lo, hi = bounds[i], bounds[i + 1]
+            range_str = f"{lo:.6f}+" if i == len(names) - 1 else f"{lo:.6f}-{hi:.6f}"
+            classes.append({
+                "name": name,
+                "range": range_str,
+                "color": {"Very Low": "#4CAF50", "Low": "#8BC34A", "Moderate": "#FFEB3B", "High": "#FF9800"}.get(name, "#999999"),
+                "description": ML_TIER_DESCRIPTIONS.get(name, ""),
+            })
+        return classes
+    except Exception as e:
+        logger.warning(f"Could not load ML tiers for /api/danger-classes, falling back to FWI: {e}")
+        return None
+
+
 @app.get("/api/danger-classes")
 async def get_danger_classes():
-    """Get fire danger class definitions and color codes.
-
-    These match the exact thresholds get_danger_class() in fire_risk.py
-    classifies with -- keep the two in sync if either changes.
+    """Fire danger class definitions and color codes for whatever system is
+    currently primary (serving_danger_class in /api/predict/fire-risk) --
+    ML's 4 tiers since the 2026-09-28 promotion decision
+    (docs/PREREGISTRATION.md), with automatic fallback to FWI's 6 if the ML
+    tier file is unavailable, matching fire_risk.py's own per-cell fallback.
     """
+    ml_classes = _get_ml_danger_classes()
+    if ml_classes:
+        return {
+            "danger_classes": ml_classes,
+            "system": "Machine-learned fire occurrence probability (Random Forest, calibrated)",
+            "note": "Probability of a fire being detected near this cell in the near term, calibrated against historical fire records. Canadian Fire Weather Index (FWI) values and their own classification remain available per-cell as fwi/danger_class."
+        }
     return {
-        "danger_classes": [
-            {"name": "Very Low", "range": "0-2 FWI", "color": "#4CAF50", "description": "Fires start easily but spread slowly"},
-            {"name": "Low", "range": "2-4 FWI", "color": "#8BC34A", "description": "Fires start easily and spread at low to moderate rates"},
-            {"name": "Moderate", "range": "4-8 FWI", "color": "#FFEB3B", "description": "Fires start easily and spread at moderate rates"},
-            {"name": "High", "range": "8-18 FWI", "color": "#FF9800", "description": "Fires start easily and spread at high rates"},
-            {"name": "Very High", "range": "18-30 FWI", "color": "#F44336", "description": "Fires start very easily and spread at very high rates"},
-            {"name": "Extreme", "range": "30+ FWI", "color": "#9C27B0", "description": "Fires start very easily and spread at extreme rates"}
-        ],
+        "danger_classes": FWI_DANGER_CLASSES,
         "system": "Canadian Fire Weather Index (FWI1987 / Van Wagner, 1987)",
         "note": "Exact class boundaries vary by provincial/territorial fire agency; these are this system's own thresholds, not a single official ECCC standard."
     }

@@ -338,6 +338,11 @@ class CanadianFireWeatherIndex:
         else:
             return "Extreme", fwi, "#9C27B0"
 
+# The ML model's 4 tier names are a subset of the FWI names above (see
+# model_components/tiers.json) -- reusing the same colors keeps the two
+# systems visually consistent rather than picking an unrelated palette.
+ML_TIER_COLORS = {"Very Low": "#4CAF50", "Low": "#8BC34A", "Moderate": "#FFEB3B", "High": "#FF9800"}
+
 FWI_STATE_FILE = "data/fwi_state.json"
 GAP_REINIT_DAYS = 3     # a gap this long or longer triggers a seasonal reinit
                         # rather than continuing from stale persisted codes
@@ -765,16 +770,24 @@ class FireWeatherProcessor:
                         'recent': recent,
                     }
 
-                    # FWI-threshold danger classification -- this, not the
-                    # ML layer below, is what's actually served. See
-                    # FireWeatherProcessor.__init__ for the shadow-mode note.
+                    # FWI-threshold danger classification. As of the
+                    # 2026-09-28 promotion decision (docs/PREREGISTRATION.md)
+                    # this is no longer what the frontend should treat as
+                    # primary -- see serving_* below -- but danger_class/
+                    # color_code themselves are deliberately left meaning
+                    # exactly what they always have (FWI's own tier), never
+                    # renamed or repointed, since ml/shadow_snapshot.py and
+                    # ml/shadow_report.py's FWI-vs-ML comparison depend on
+                    # that field continuing to mean FWI specifically. Also
+                    # doubles as the fail-safe fallback if ML is unavailable.
                     danger_class, _, color = self.fwi_calculator.get_danger_class(fwi_data['fwi'])
                     adjusted_fwi = fwi_data['fwi']
 
-                    # Shadow-mode ML scoring: computed and logged, never
-                    # served. A failure here must never affect the FWI
-                    # result above -- caught and skipped per-cell, not
-                    # allowed to abort the whole run.
+                    # ML scoring: computed and logged always. A failure here
+                    # must never affect the FWI result above -- caught and
+                    # skipped per-cell, not allowed to abort the whole run,
+                    # and the serving_* fields below fall back to FWI's own
+                    # classification if it happens.
                     ml_danger_class, ml_risk_probability = None, None
                     if self.ml_model is not None:
                         try:
@@ -797,23 +810,46 @@ class FireWeatherProcessor:
                     if precip_24h is None:
                         precip_24h = (self._num_or(row, 'rain_1h_mm') + self._num_or(row, 'rain_3h_mm') +
                             self._num_or(row, 'snow_1h_mm') + self._num_or(row, 'snow_3h_mm'))
-                    
+
                     # Ensure FWI is valid
                     if np.isnan(adjusted_fwi) or np.isinf(adjusted_fwi):
                         adjusted_fwi = 5.0
                         danger_class = "Moderate"
                         color = "#FFEB3B"
-                    
+
+                    # serving_* is the single field set the frontend should
+                    # read -- whichever system is actually primary right
+                    # now, decoupled from which one computed it. ML when
+                    # available; FWI's own (already-repaired-if-needed)
+                    # classification as the fail-safe fallback (matching
+                    # /api/danger-classes' own default, see main.py -- a
+                    # known, accepted gap: in the rare case ML is
+                    # unavailable, that endpoint still describes ML's tiers
+                    # until the next code deploy, not autodetected).
+                    if ml_danger_class is not None:
+                        serving_danger_class = ml_danger_class
+                        serving_color_code = ML_TIER_COLORS.get(ml_danger_class, color)
+                        serving_risk_probability = ml_risk_probability
+                    else:
+                        serving_danger_class = danger_class
+                        serving_color_code = color
+                        serving_risk_probability = None
+
                     result_raw = {
                         'lat': lat,
                         'lon': lon,
                         'location_name': str(row.get('nearest_station', f'Grid_{idx}')),
                         'province': self.get_province(lat, lon),
                         'fwi': adjusted_fwi,  # Fire Weather Index value (not percentage!)
-                        'danger_class': danger_class,
+                        'danger_class': danger_class,  # always FWI's own tier -- see comment above
                         'color_code': color,
-                        'ml_danger_class': ml_danger_class,  # shadow mode only -- not served, see __init__
+                        'ml_danger_class': ml_danger_class,  # ML's own tier, regardless of what's primary
                         'ml_risk_probability': ml_risk_probability,
+                        # The field the frontend should actually read: whichever system is
+                        # primary right now (ML, with FWI as fail-safe fallback -- see above).
+                        'serving_danger_class': serving_danger_class,
+                        'serving_color_code': serving_color_code,
+                        'serving_risk_probability': serving_risk_probability,
                         'weather_features': {
                             'temperature': row.get('temperature', 15),
                             'humidity': row.get('humidity', 50),
