@@ -1,0 +1,28 @@
+# Render Blueprint. Deploys from the `deploy` branch, which
+# .github/workflows/daily-pipeline.yml rebuilds and force-pushes once daily
+# with fresh data baked in -- see that workflow and the deployment plan for
+# why (Render's free tier has ephemeral disk, so runtime writes don't
+# persist; baking data into the deploy avoids needing any of that).
+#
+# If Render's Blueprint flow doesn't pick this up cleanly, create the
+# service manually with these exact settings instead (branch: deploy is the
+# one that matters most).
+
+services:
+  - type: web
+    name: forest-fire-predictor-api
+    runtime: python
+    plan: free
+    branch: deploy
+    autoDeploy: true
+    buildCommand: "pip install -r requirements-serve.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /
+    envVars:
+      # Pipeline endpoints (/api/system/retrain, /api/system/reload) stay
+      # off -- the pipeline runs in GitHub Actions, not via API call. See
+      # main.py's ENABLE_PIPELINE_ENDPOINTS gate.
+      - key: ENABLE_PIPELINE_ENDPOINTS
+        value: "false"
+      - key: CUSTOM_DOMAIN
+        value: forestfirepredictor.com

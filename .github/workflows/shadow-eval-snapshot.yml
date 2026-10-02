@@ -1,0 +1,75 @@
+name: Shadow eval - daily prediction snapshot
+
+on:
+  # workflow_run, NOT a clock guess. daily-pipeline.yml has
+  # timeout-minutes: 120 and a 10-37min collection step, so any fixed
+  # schedule risks silently snapshotting YESTERDAY's fwi_predictions.json
+  # under today's date -- which would corrupt the forward-window analysis
+  # in a way indistinguishable from real model drift. This also guarantees
+  # it never runs against a failed pipeline.
+  workflow_run:
+    workflows: ["Daily FWI pipeline"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shadow-eval-log-writer
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out code from main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Check out the accumulating shadow-eval log
+        uses: actions/checkout@v4
+        with:
+          ref: shadow-eval-log
+          path: shadow_eval_log
+          fetch-depth: 0
+
+      - name: Read today's served artifacts from the deploy branch
+        run: |
+          set -euo pipefail
+          # Read-only. This workflow NEVER pushes to deploy -- deploy has
+          # exactly one force-pusher (daily-pipeline.yml) and must keep it.
+          git fetch --depth=1 origin deploy
+          git checkout FETCH_HEAD -- fwi_predictions.json model_info.json model_components/tiers.json
+          git reset --quiet
+          git rev-parse FETCH_HEAD > .deploy_sha
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        # No geospatial deps here -- this script does no attribution, only
+        # requirements.txt (numpy/pandas/scipy already in it for spearmanr).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Snapshot per-cell tiers and the daily distribution check
+        run: python -u -m ml.shadow_snapshot --log-dir shadow_eval_log --deploy-sha-file .deploy_sha
+
+      - name: Redundant copy as a run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: predictions-${{ github.run_id }}
+          path: shadow_eval_log/predictions/
+          retention-days: 90
+          if-no-files-found: warn
