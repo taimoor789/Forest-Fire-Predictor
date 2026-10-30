@@ -1,0 +1,190 @@
+name: Daily FWI pipeline
+
+on:
+  schedule:
+    # 19:37 UTC daily -- matches the retired Elastic Beanstalk cron's 19:00
+    # UTC cadence, offset from the top of the hour since :00 is GitHub's
+    # most congested scheduling slot (runs there are routinely delayed or
+    # dropped).
+    - cron: "37 19 * * *"
+  workflow_dispatch:
+    inputs:
+      cold_start:
+        description: "Ignore the previous fwi_state.json and bootstrap from the weather window"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  # A scheduled run and a manual run must never interleave: both read the
+  # same fwi_state.json from `deploy` and both force-push it back, so an
+  # overlap would silently drop or duplicate a day of FFMC/DMC/DC
+  # accumulation.
+  group: daily-fwi-pipeline
+  cancel-in-progress: false
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    # ECCC collection is ~10-20min; the Open-Meteo fallback is ~37min.
+    # 120 covers both back to back plus retries.
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out code from main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Restore pipeline state from the deploy branch
+        run: |
+          set -euo pipefail
+
+          if ! git fetch --depth=1 origin deploy; then
+            echo "::warning::No deploy branch found -- treating this as a cold start."
+            exit 0
+          fi
+
+          PATHS="data/canada_fire_grid.csv weather_data model_components fwi_predictions.json model_info.json"
+          if [ "${{ inputs.cold_start }}" = "true" ]; then
+            echo "::warning::cold_start requested -- NOT restoring data/fwi_state.json."
+          else
+            PATHS="$PATHS data/fwi_state.json"
+          fi
+
+          for p in $PATHS; do
+            if git cat-file -e "FETCH_HEAD:$p" 2>/dev/null; then
+              git checkout FETCH_HEAD -- "$p"
+              echo "restored $p"
+            else
+              echo "::warning::deploy branch has no $p -- cold start for this path."
+            fi
+          done
+
+          # `git checkout <tree-ish> -- <path>` stages as well as
+          # materializes. Unstage so the publish step below builds its own
+          # index explicitly instead of inheriting this one.
+          git reset --quiet
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install pipeline dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run the daily pipeline
+        run: python -u daily_update.py --pipeline-only
+
+      - name: Validate pipeline output before publishing
+        run: |
+          python - <<'PY'
+          import json, os, sys, glob
+          from datetime import datetime, timezone
+
+          MIN_CELLS = 5000  # in-domain cells after Stage 1's land mask is 7,537
+          fail = []
+
+          try:
+              with open("fwi_predictions.json") as f:
+                  preds = json.load(f)
+          except Exception as e:
+              print(f"FATAL: fwi_predictions.json unreadable: {e}")
+              sys.exit(1)
+
+          if not preds.get("success"):
+              fail.append("fwi_predictions.json has success falsy")
+          n = len(preds.get("data") or [])
+          if n < MIN_CELLS:
+              fail.append(f"only {n} prediction records (expected >= {MIN_CELLS})")
+
+          # Catches a silent no-op that left yesterday's file in place: the
+          # timestamp is written fresh by fire_risk.py's main() every run.
+          ts = preds.get("timestamp")
+          try:
+              age_h = (datetime.now() - datetime.fromisoformat(ts)).total_seconds() / 3600
+              if age_h > 6:
+                  fail.append(f"predictions timestamp is {age_h:.1f}h old -- pipeline did not regenerate them")
+          except Exception as e:
+              fail.append(f"unparseable predictions timestamp {ts!r}: {e}")
+
+          try:
+              with open("data/fwi_state.json") as f:
+                  state = json.load(f)
+              if len(state) < MIN_CELLS:
+                  fail.append(f"fwi_state.json has only {len(state)} cells (expected >= {MIN_CELLS})")
+          except Exception as e:
+              fail.append(f"data/fwi_state.json unreadable: {e}")
+
+          today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+          if not os.path.exists(f"weather_data/{today}.csv"):
+              have = sorted(os.path.basename(p) for p in glob.glob("weather_data/*.csv"))
+              fail.append(f"no weather_data/{today}.csv; newest present is {have[-1] if have else 'none'}")
+
+          if not os.path.exists("model_info.json"):
+              fail.append("model_info.json missing")
+
+          if fail:
+              for f_ in fail:
+                  print(f"VALIDATION FAILED: {f_}")
+              sys.exit(1)
+          print(f"Validation passed: {n} prediction records, {len(state)} state entries, weather_data/{today}.csv present.")
+          PY
+
+      - name: Back up FWI state for rollback
+        uses: actions/upload-artifact@v4
+        with:
+          name: fwi-state-${{ github.run_id }}
+          path: data/fwi_state.json
+          retention-days: 30
+          compression-level: 9
+
+      - name: Publish snapshot to the deploy branch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # --orphan keeps the current index (main's tracked source files)
+          # and working tree, but drops all history. Re-publishing a single
+          # commit each day keeps the branch at one ~19MB-packed snapshot
+          # instead of accumulating ~4.6MB/day of binary churn forever
+          # (~1.7GB/yr) -- verified against actual file sizes before picking
+          # this approach.
+          git checkout --quiet --orphan deploy-build
+
+          # Explicit paths only. NEVER `git add data` -- data/ also holds
+          # the ml/ rebuild pipeline's multi-GB parquet/GRIB archives
+          # (gitignored, irrelevant to serving).
+          git add -f fwi_predictions.json model_info.json
+          git add -f data/canada_fire_grid.csv data/fwi_state.json
+          # -A is required, not optional: cleanup_old_weather_data() in
+          # fire_risk.py deletes the oldest CSV each run, and -A is what
+          # stages that removal. Without it weather_data/ on this branch
+          # grows without bound even though the local copy stays capped.
+          git add -A -f weather_data model_components
+
+          git commit -q -m "data: FWI snapshot $(date -u +%Y-%m-%dT%H:%MZ)
+
+          Generated by .github/workflows/daily-pipeline.yml run ${{ github.run_id }}
+          from source commit ${{ github.sha }}."
+
+          git push --force origin deploy-build:deploy
+          echo "Pushed snapshot to deploy; Render auto-deploy should now fire."
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
+          if-no-files-found: ignore
