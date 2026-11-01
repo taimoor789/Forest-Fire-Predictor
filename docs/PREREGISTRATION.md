@@ -373,3 +373,60 @@ forward-window censored). 603 distinct (cell, day) positives at W1.
 means the ML model is cleared for promotion to primary. The actual
 frontend/backend switch-over is, as pre-registered, a separate decision —
 not executed by this amendment alone.
+
+**2026-11-01 — v2 retrain on full-year data: gate, written before any v2
+result exists.**
+
+**Why.** The promoted (v1) model was trained and evaluated only on Apr 1 –
+Oct 31 rows. From November onward it serves an extrapolation: on
+2026-11-01 it put 493 cells in High while FWI put 6,640 of 7,537 in Very
+Low, and Ottawa-area cells showed High at 2–6% with FWI 6–9. No v1 gate
+condition could have caught this, because no v1 test row was outside the
+fire season. v2 keeps every v1 design choice (features, label_w2, splits,
+folds, seed, model family selection, isotonic calibration) and changes only
+the row universe: Jan 1 – Dec 31 of every target year, with the FWI replay
+run as one continuous chain per cell from 75 days before Jan 1, 2019
+(`ml/replay_fwi.py`), matching how production steps codes forward
+year-round.
+
+**Tier derivation (decided now, not after seeing results).** Tiers stay
+equal-frequency quartiles of calibrated probability, derived on the
+calibration split, **restricted to its Apr–Oct rows**. Deriving them on
+full-year rows would let ~5 months of near-zero winter predictions pull
+every cutoff down, so "High" would start at a lower probability than it
+does today, the opposite of the fix wanted. Winter rows are still scored
+against these cutoffs and land wherever their probability puts them.
+
+**v2 ships only if all of these hold**, on the pre-registered
+spatio-temporal test split (fold 0 × 2023), now covering all 12 months:
+
+1. **Original gate conditions 1–4 and the serving-safety gate, unchanged
+   thresholds**, recomputed on the full-year test rows: ≥25% relative
+   PR-AUC lift over B1 with paired-CI lower bound > 0; beats B2 on PR-AUC
+   and precision@top-5%; ECE ≤ 0.02; strictly monotone test-split tier
+   fire rates; lift not concentrated in A1→A2.
+2. **No fire-season regression.** On the Apr–Oct subset of the test rows,
+   v2's PR-AUC is ≥ 90% of v1's recorded 0.1791 (i.e. ≥ 0.1612). The 10%
+   tolerance is about the width of v1's own bootstrap CI; anything below
+   it means fixing winter cost real fire-season skill.
+3. **Off-season calibration (the bug itself).** On the Nov–Mar subset of
+   the test rows, the ratio of v2's mean calibrated probability to the
+   observed label_w2 rate is within [0.5, 2.0]. v1's ratio on the same
+   rows is reported alongside as the before/after contrast. If these rows
+   hold fewer than 30 positives, condition 3 is reported INCONCLUSIVE and
+   condition 4 alone decides the off-season question.
+4. **Off-season ordering (label-free, always evaluable).** On the same
+   Nov–Mar test rows, v2's mean calibrated probability and its share of
+   cell-days in Moderate+High are both lower than on the Apr–Oct test
+   rows.
+5. **Live serving-safety on today's data.** Before switching, v2's
+   serving-safety check (live median inside the new full-year training
+   set's 5th–95th percentile band) passes on the current November ECCC
+   feed. This replaces the v1 shadow period: CWFIS hotspots in November
+   are too sparse for T2–T5 to be evaluable before spring.
+
+**Decision mapping.** All five pass → deploy v2 in place of v1 (same
+serving path, new model components). Any condition fails (3 only counts
+when it is conclusive) → v1 stays
+live, the failure is recorded here, and the off-season problem goes back
+to the tier/labelling options rather than being tuned until it passes.
