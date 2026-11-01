@@ -858,7 +858,9 @@ class FireWeatherProcessor:
                             'precip_24h_mm': precip_24h,  # true 24h accumulation, not an hourly snapshot
                             'is_hot': 1 if row.get('temperature', 15) > 25 else 0,
                             'is_dry': 1 if row.get('humidity', 50) < 30 else 0,
-                            'humidity_temp_ratio': row.get('humidity', 50) / (row.get('temperature', 15) + 1),
+                            # temperature == -1.0 exactly made this divide by zero and drop the whole cell.
+                            'humidity_temp_ratio': (row.get('humidity', 50) / (row.get('temperature', 15) + 1)
+                                                    if row.get('temperature', 15) != -1 else None),
                             'is_windy': 1 if row.get('wind_speed', 10) > 15 else 0,
                             'total_precip': precip_24h,
                             'has_recent_precip': 1 if precip_24h > 0 else 0,
