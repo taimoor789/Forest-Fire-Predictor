@@ -430,3 +430,27 @@ serving path, new model components). Any condition fails (3 only counts
 when it is conclusive) → v1 stays
 live, the failure is recorded here, and the off-season problem goes back
 to the tier/labelling options rather than being tuned until it passes.
+
+**2026-11-01 (later) — v2 first run deviated from the tier spec above;
+re-run with quartiles. Disclosed after seeing a failure.**
+
+The first v2 training run did not implement what this amendment specifies.
+`ml/train.py` asks for 6 equal-frequency tiers and merges duplicate bounds;
+v1 collapsed to 4 only because so many calibration rows sat at exactly
+zero. Restricting derivation to Apr–Oct rows removed that tie and produced
+**5 tiers**, not the "equal-frequency quartiles" written above (and not the
+4 the live frontend renders). On those 5 tiers, condition 1's strict
+monotonicity check **failed**: test-split fire rates Very Low 0.000128
+(n=62,683, ~8 positives) vs Low 0.000050 (n=141,048, ~7 positives), then
+Moderate 0.0011, High 0.0078, Very High 0.0872. Other numbers from that
+run: test ECE 0.0090, full-year test PR-AUC 0.1586, ablation A5-vs-B1
+relative lift 339%.
+
+The mismatch with the written spec was noticed **after** seeing that
+failure, which is recorded here so it can be weighed accordingly: the fix
+(set `N_TIERS = 4`) is what this amendment already said, but it also merges
+exactly the two tiers that inverted. Nothing else changes — same dataset,
+same model (RandomForest is deterministic under `config.SEED`), same
+calibrator, same thresholds for every condition. The 5-tier result stands
+as a failed run of a mis-implemented spec, not a deleted one; whatever the
+4-tier re-run shows is the decision.
