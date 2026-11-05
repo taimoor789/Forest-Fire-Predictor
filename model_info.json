@@ -1,0 +1,35 @@
+{
+  "model_type": "Canadian Fire Weather Index System",
+  "fwi_standard": "FWI1987 (Van Wagner, 1987)",
+  "methodology": "Persisted daily FFMC/DMC/DC accumulation per cell with seasonal reinitialization",
+  "algorithm": "Pure CFWIS (Van Wagner, 1987)",
+  "processing_stats": {
+    "total_locations": 7537,
+    "processed_successfully": 7537,
+    "processing_errors": 0,
+    "processing_time_seconds": 198.320952,
+    "fwi_statistics": {
+      "min_fwi": 7.230420645578329e-10,
+      "max_fwi": 21.35154266655682,
+      "mean_fwi": 0.8485363105214138,
+      "very_low_count": 6707,
+      "low_count": 472,
+      "moderate_count": 252,
+      "high_count": 101,
+      "very_high_count": 5,
+      "extreme_count": 0
+    },
+    "ml_shadow": {
+      "scored_count": 7537,
+      "agreement_rate": 0.8544513732254213,
+      "ml_class_distribution": {
+        "Moderate": 268,
+        "High": 1,
+        "Low": 481,
+        "Very Low": 6787
+      }
+    }
+  },
+  "last_trained": "2026-11-05T00:36:15.779386",
+  "version": "FWI_2.1_Pure"
+}

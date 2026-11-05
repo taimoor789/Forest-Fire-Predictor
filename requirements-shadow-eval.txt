@@ -1,0 +1,15 @@
+# Installed on TOP of requirements.txt, not instead of it:
+#   pip install -r requirements.txt -r requirements-shadow-eval.txt
+#
+# ml/cwfis_hotspots.py needs geopandas/shapely/pyproj for
+# ml.attribution.assign_nearest_cell (the same nearest-cell join Stage 2/3
+# of the ML rebuild use). requirements.txt already covers everything else
+# these scripts import (ml/config.py transitively pulls in fire_risk and
+# collect_weather_grid_eccc, both of which requirements.txt already pins).
+#
+# Deliberately NOT requirements-ml.txt -- that drags in lightgbm/shap/
+# cdsapi/xarray/cfgrib/netCDF4, none of which this path touches.
+
+geopandas==1.0.1
+shapely==2.0.7
+pyproj==3.6.1
