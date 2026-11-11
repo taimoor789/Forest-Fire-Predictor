@@ -20,11 +20,11 @@ Notes that matter for correctness, not just what the code does:
 import argparse
 import json
 import math
+import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -180,9 +180,10 @@ def main():
 
     Path(OUTPUT_DIR).mkdir(exist_ok=True)
 
-    calgary_tz = ZoneInfo("America/Edmonton")
-    now_local = datetime.now(calgary_tz)
-    today_str = now_local.strftime("%Y-%m-%d")
+    # UTC, same as collect_weather_grid_eccc.py. This used Edmonton time, so
+    # as a fallback just after midnight UTC it saw yesterday's file, skipped
+    # the fetch, and reported success with no new data.
+    today_str = os.environ.get("PIPELINE_DATE") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     output_path = Path(OUTPUT_DIR) / f"{today_str}.csv"
 
     if output_path.exists() and not args.force:
@@ -218,7 +219,7 @@ def main():
             rows.append({
                 "lat": cell["lat"],
                 "lon": cell["lon"],
-                "date": now_local.strftime("%Y-%m-%d %H:%M:%S"),
+                "date": f"{today_str} {datetime.now(timezone.utc):%H:%M:%S}",
                 **values,
             })
 

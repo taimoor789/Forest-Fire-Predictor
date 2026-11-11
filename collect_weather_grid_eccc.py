@@ -26,6 +26,7 @@ Output: weather_data/YYYY-MM-DD.csv, same schema as collect_weather_grid.py.
 """
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -110,7 +111,17 @@ def get_province(lat, lon):
 
 def list_dir(url):
     """Names of files/subdirectories in an Apache-style HTTP directory listing."""
-    resp = requests.get(url, timeout=30)
+    # Retried: one slow response from the Datamart here used to fail the
+    # whole collector (3 of the 4 pipeline failures in early Nov 2026).
+    for attempt in range(4):
+        try:
+            resp = requests.get(url, timeout=30)
+            break
+        except requests.RequestException as e:
+            if attempt == 3:
+                raise
+            logger.warning(f"Listing {url} failed ({e.__class__.__name__}); retry {attempt + 1}/3")
+            time.sleep(10 * (attempt + 1))
     if resp.status_code != 200:
         return []
     return re.findall(r'href="([^"?][^"]*)"', resp.text)
@@ -379,7 +390,9 @@ def main():
     Path(OUTPUT_DIR).mkdir(exist_ok=True)
 
     now_utc = datetime.now(timezone.utc)
-    today_str = now_utc.strftime("%Y-%m-%d")
+    # PIPELINE_DATE (set once per run by daily-pipeline.yml) pins the output
+    # date so every step of a run agrees on it even across midnight UTC.
+    today_str = os.environ.get("PIPELINE_DATE") or now_utc.strftime("%Y-%m-%d")
     output_path = Path(OUTPUT_DIR) / f"{today_str}.csv"
 
     if output_path.exists() and not args.force:
@@ -469,7 +482,7 @@ def main():
     df_output = pd.DataFrame({
         "lat": grid["lat"],
         "lon": grid["lon"],
-        "date": now_utc.strftime("%Y-%m-%d %H:%M:%S"),
+        "date": f"{today_str} {now_utc:%H:%M:%S}",
         "temperature": results["temperature"],
         "humidity": results["humidity"],
         "wind_speed": results["wind_speed"],

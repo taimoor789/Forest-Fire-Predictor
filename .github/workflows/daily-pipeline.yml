@@ -2,11 +2,11 @@ name: Daily FWI pipeline
 
 on:
   schedule:
-    # 19:37 UTC daily -- matches the retired Elastic Beanstalk cron's 19:00
-    # UTC cadence, offset from the top of the hour since :00 is GitHub's
-    # most congested scheduling slot (runs there are routinely delayed or
-    # dropped).
-    - cron: "37 19 * * *"
+    # 15:37 UTC daily. GitHub starts scheduled runs on this repo 4-6 hours
+    # late; from the old 19:37 slot that landed around midnight UTC, where
+    # a run could start on one UTC date and finish on the next. Offset from
+    # the top of the hour since :00 is GitHub's most congested slot.
+    - cron: "37 15 * * *"
   workflow_dispatch:
     inputs:
       cold_start:
@@ -69,7 +69,22 @@ jobs:
           # index explicitly instead of inheriting this one.
           git reset --quiet
 
+      - name: Pin the run date
+        # One UTC date for the whole run, so the collectors and the
+        # validation gate can't disagree if the run crosses midnight. If
+        # deploy already has this date's weather file, the day is already
+        # published: running again would feed the same weather through
+        # fwi_state.json twice and double-advance every cell's codes.
+        run: |
+          RUN_DATE=$(date -u +%F)
+          echo "PIPELINE_DATE=$RUN_DATE" >> "$GITHUB_ENV"
+          if [ -f "weather_data/$RUN_DATE.csv" ]; then
+            echo "::notice::$RUN_DATE is already published on deploy -- nothing to do."
+            echo "ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
+          fi
+
       - name: Set up Python
+        if: env.ALREADY_PUBLISHED != 'true'
         uses: actions/setup-python@v5
         with:
           python-version-file: .python-version
@@ -77,14 +92,17 @@ jobs:
           cache-dependency-path: requirements.txt
 
       - name: Install pipeline dependencies
+        if: env.ALREADY_PUBLISHED != 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Run the daily pipeline
+        if: env.ALREADY_PUBLISHED != 'true'
         run: python -u daily_update.py --pipeline-only
 
       - name: Validate pipeline output before publishing
+        if: env.ALREADY_PUBLISHED != 'true'
         run: |
           python - <<'PY'
           import json, os, sys, glob
@@ -124,7 +142,10 @@ jobs:
           except Exception as e:
               fail.append(f"data/fwi_state.json unreadable: {e}")
 
-          today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+          # The date pinned at the start of the run, not "now": a run that
+          # finished just after midnight UTC used to fail here looking for
+          # tomorrow's file.
+          today = os.environ["PIPELINE_DATE"]
           if not os.path.exists(f"weather_data/{today}.csv"):
               have = sorted(os.path.basename(p) for p in glob.glob("weather_data/*.csv"))
               fail.append(f"no weather_data/{today}.csv; newest present is {have[-1] if have else 'none'}")
@@ -140,6 +161,7 @@ jobs:
           PY
 
       - name: Back up FWI state for rollback
+        if: env.ALREADY_PUBLISHED != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: fwi-state-${{ github.run_id }}
@@ -148,6 +170,7 @@ jobs:
           compression-level: 9
 
       - name: Publish snapshot to the deploy branch
+        if: env.ALREADY_PUBLISHED != 'true'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
