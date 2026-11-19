@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   pipeline:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # ubuntu-latest moved to 26.04, which has no Python 3.11.9 build
     # ECCC collection is ~10-20min; the Open-Meteo fallback is ~37min.
     # 120 covers both back to back plus retries.
     timeout-minutes: 120
