@@ -1,0 +1,45 @@
+{
+  "run_id": "stage10_train_20260911T073316Z_9454c374",
+  "selected_model": "rf_original",
+  "inner_cv_scores": {
+    "rf_original": 0.06582092391184222,
+    "lgbm_a": 0.032273963333909084,
+    "lgbm_b": 0.02695816368282686,
+    "lgbm_c": 0.03324258630294811
+  },
+  "test_pr_auc_calibrated": 0.17913653007852978,
+  "test_ece_calibrated": 0.009952110643467986,
+  "gate_ece_pass": true,
+  "monotone_out_of_sample": true,
+  "tier_names": [
+    "Very Low",
+    "Low",
+    "Moderate",
+    "High"
+  ],
+  "tier_bounds": [
+    0.0,
+    7.416196974191635e-05,
+    0.000838316660146426,
+    0.010560924579057487,
+    1.000000001
+  ],
+  "test_tier_rates": [
+    {
+      "n": 35507,
+      "fire_rate": 0.0001408173036302701
+    },
+    {
+      "n": 74653,
+      "fire_rate": 0.0006429748302144589
+    },
+    {
+      "n": 114197,
+      "fire_rate": 0.007189330717969824
+    },
+    {
+      "n": 125105,
+      "fire_rate": 0.0872307261900004
+    }
+  ]
+}
