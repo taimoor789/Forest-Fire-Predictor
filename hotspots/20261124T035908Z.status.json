@@ -1,0 +1,16 @@
+{
+  "pull_id": "20261124T035908Z",
+  "fetched_at": "2026-11-24T03:59:09.250664+00:00",
+  "status": "ok",
+  "n_rows_total_continent": 1311,
+  "coverage": {
+    "n_fires": 642,
+    "n_attributed": 226,
+    "n_dropped": 416,
+    "pct_dropped": 64.797507788162,
+    "dist_km_median": 251.8065815802561,
+    "dist_km_p95": 680.5043424044068,
+    "dist_km_max": 860.6187519283305,
+    "max_km_cap": 60.0
+  }
+}
