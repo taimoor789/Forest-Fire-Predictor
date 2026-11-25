@@ -2,7 +2,7 @@
   "snapshot_date": "2026-11-25",
   "n_cells": 7537,
   "n_ml_scored": 7537,
-  "predictions_timestamp_age_hours": 0.05,
+  "predictions_timestamp_age_hours": 23.67,
   "deploy_sha": "666eed3ae4232285fde8eddb88482ea069b2b1a0",
   "percentiles": {
     "ffmc": {
